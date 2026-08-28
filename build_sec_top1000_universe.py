@@ -67,7 +67,8 @@ def build(warehouse: Path, output: Path) -> dict[str, Any]:
                    i.legal_name AS company_name,
                    json_extract(i.identity_json, '$.sic') AS sic,
                    json_extract(i.identity_json, '$.sic_description') AS sic_description,
-                   json_extract(i.identity_json, '$.exchanges') AS exchanges
+                   json_extract(i.identity_json, '$.exchanges') AS exchanges,
+                   json_extract(i.identity_json, '$.companyfacts_archive_sha256') AS companyfacts_archive_sha256
             FROM snapshot_issuers AS snapshot
             JOIN issuers AS i ON i.cik = snapshot.cik
             WHERE snapshot.snapshot_id = ?
@@ -169,6 +170,15 @@ def build(warehouse: Path, output: Path) -> dict[str, Any]:
         raise RuntimeError(f"expected 1,000 eligible issuers, found {len(selected)}")
     if len({row["cik"] for row in selected}) != 1000:
         raise RuntimeError("selected universe contains duplicate CIKs")
+    companyfacts_archive_hashes = {
+        str(identities[row["cik"]].get("companyfacts_archive_sha256") or "")
+        for row in selected
+    }
+    if len(companyfacts_archive_hashes) != 1:
+        raise RuntimeError("selected universe spans multiple SEC Company Facts archives")
+    companyfacts_archive_sha256 = companyfacts_archive_hashes.pop()
+    if len(companyfacts_archive_sha256) != 64:
+        raise RuntimeError("SEC Company Facts archive hash is invalid")
 
     with localcontext() as context:
         context.prec = 60
@@ -195,9 +205,7 @@ def build(warehouse: Path, output: Path) -> dict[str, Any]:
         "source": {
             "provider": "U.S. Securities and Exchange Commission",
             "warehouse_snapshot_id": snapshot_id,
-            "companyfacts_archive_sha256": (
-                selected[0]["fundamental_evidence"]["ttm_revenue"]["source_sha256"]
-            ),
+            "companyfacts_archive_sha256": companyfacts_archive_sha256,
             "company_tickers_exchange_source": "https://www.sec.gov/files/company_tickers_exchange.json",
             "sec_only": True,
         },
