@@ -578,6 +578,7 @@ class JobStore:
             "index_title": request["mandate"]["title"],
             "index_mandate": request["mandate"]["phrase"],
             "rubric": primary_rubric.parsed,
+            "rubric_raw_utf8": primary_rubric.raw,
             "rubric_request_sha256": primary_rubric.request_sha256,
             "rubric_content_sha256": primary_rubric.content_sha256,
             "model": {"id": MODEL_ID, "revision": MODEL_REVISION, "execution_profile": MODEL_PROFILE},
@@ -591,7 +592,9 @@ class JobStore:
                 "weight_units": WEIGHT_UNITS,
             },
             "score_vector_sha256": sha256(canonical_bytes(score_vector)),
+            "scores": sorted(score_rows, key=lambda row: (row["ticker"], row["cik"])),
             "replay_proof": replay_proof,
+            "replay_comparisons": comparisons,
             "constituent_count": len(holdings),
             "holdings": holdings,
         }
