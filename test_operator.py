@@ -9,7 +9,7 @@ def test_canonical_universe_is_exactly_top_1000() -> None:
     assert len({row["cik"] for row in rows}) == 1000
     assert len(universe_hash) == 64
     assert metadata["company_count"] == 1000
-    assert metadata["id"].startswith("sec-us-listed-top1000")
+    assert metadata["id"].startswith("sec-registered-us-listed-top1000")
     assert all(Decimal(row["adjusted_scale"]) > 0 for row in rows)
 
 

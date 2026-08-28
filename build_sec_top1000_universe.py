@@ -25,6 +25,7 @@ DEFAULT_WAREHOUSE = Path(
     "companyfacts-only-compact-full-20260827-v1.sqlite"
 )
 DEFAULT_OUTPUT = ROOT / "data" / "sec_top1000_universe_20260827.json"
+DEFAULT_SHARADAR_SNAPSHOT = ROOT / "data" / "sharadar_art_snapshot_20260828.json"
 AS_OF_DATE = dt.date(2026, 8, 27)
 MAX_FUNDAMENTAL_AGE_DAYS = 550
 ELIGIBLE_EXCHANGES = {"Nasdaq", "NYSE", "NYSE American"}
@@ -52,7 +53,21 @@ def is_financial_or_utility(sic: str) -> bool:
     return 4900 <= code <= 4999 or 6000 <= code <= 6799
 
 
-def build(warehouse: Path, output: Path) -> dict[str, Any]:
+def load_sharadar_snapshot(path: Path) -> tuple[dict[str, dict[str, Any]], str]:
+    artifact = json.loads(path.read_bytes())
+    if artifact.get("schema") != "corbanu.sharadar-art-snapshot.v1":
+        raise RuntimeError("unsupported Sharadar snapshot schema")
+    expected_hash = str(artifact.get("snapshot_sha256") or "")
+    payload = dict(artifact)
+    payload.pop("snapshot_sha256", None)
+    if len(expected_hash) != 64 or sha256(canonical_bytes(payload)) != expected_hash:
+        raise RuntimeError("Sharadar snapshot content hash does not verify")
+    rows = {str(row["ticker"]).upper(): row for row in artifact.get("rows") or []}
+    return rows, expected_hash
+
+
+def build(warehouse: Path, output: Path, sharadar_snapshot: Path = DEFAULT_SHARADAR_SNAPSHOT) -> dict[str, Any]:
+    sharadar_by_ticker, sharadar_snapshot_sha256 = load_sharadar_snapshot(sharadar_snapshot)
     connection = sqlite3.connect(f"file:{warehouse.resolve()}?mode=ro", uri=True)
     connection.row_factory = sqlite3.Row
     snapshot_id = int(
@@ -68,6 +83,7 @@ def build(warehouse: Path, output: Path) -> dict[str, Any]:
                    json_extract(i.identity_json, '$.sic') AS sic,
                    json_extract(i.identity_json, '$.sic_description') AS sic_description,
                    json_extract(i.identity_json, '$.exchanges') AS exchanges,
+                   json_extract(i.identity_json, '$.tickers') AS tickers,
                    json_extract(i.identity_json, '$.companyfacts_archive_sha256') AS companyfacts_archive_sha256
             FROM snapshot_issuers AS snapshot
             JOIN issuers AS i ON i.cik = snapshot.cik
@@ -120,27 +136,39 @@ def build(warehouse: Path, output: Path) -> dict[str, Any]:
         if sic in EXCLUDED_SIC or EXCLUDED_NAME.search(name):
             exclude("fund_spac_or_non_operating_vehicle")
             continue
-        observations = {
-            field: latest.get((cik, field), (None, None))[1]
-            for field in ("revenue", "fcf", "netinc")
-        }
-        revenue = observations["revenue"]
-        if revenue is None:
+        observations = {field: latest.get((cik, field), (None, None))[1] for field in ("revenue", "fcf", "netinc")}
+        sharadar_tickers = [str(identity["ticker"]).upper()] + sorted(
+            str(value).upper() for value in json.loads(identity.get("tickers") or "[]") if value
+        )
+        sharadar_art = next(
+            (sharadar_by_ticker[ticker] for ticker in sharadar_tickers if ticker in sharadar_by_ticker),
+            None,
+        )
+        if sharadar_art is None or sharadar_art.get("revenueusd") is None:
             exclude("missing_ttm_revenue")
             continue
-        revenue_value = Decimal(revenue["value_text"])
+        revenue_value = Decimal(str(sharadar_art["revenueusd"]))
         if revenue_value <= 0:
             exclude("nonpositive_ttm_revenue")
             continue
-        if dt.date.fromisoformat(revenue["period_end"]) < stale_before:
+        if dt.date.fromisoformat(str(sharadar_art["calendardate"])) < stale_before:
             exclude("stale_ttm_revenue")
             continue
         accounting_regime = "financial_or_utility" if is_financial_or_utility(sic) else "ordinary_operating"
         profitability_field = "netinc" if accounting_regime == "financial_or_utility" else "fcf"
-        profitability = observations[profitability_field]
-        if profitability is None:
+        if sharadar_art.get(profitability_field) is None or sharadar_art.get("fxusd") is None:
             exclude("missing_selected_profitability")
             continue
+        fxusd = Decimal(str(sharadar_art["fxusd"]))
+        if fxusd <= 0:
+            exclude("invalid_fxusd")
+            continue
+        profitability_value = Decimal(str(sharadar_art[profitability_field])) / fxusd
+        sec_revenue = observations["revenue"]
+        sec_cross_check_ratio = None
+        if sec_revenue is not None and Decimal(sec_revenue["value_text"]) > 0:
+            sec_value = Decimal(sec_revenue["value_text"])
+            sec_cross_check_ratio = decimal_text(max(sec_value / revenue_value, revenue_value / sec_value))
         candidates.append(
             {
                 "cik": str(cik).zfill(10),
@@ -156,10 +184,11 @@ def build(warehouse: Path, output: Path) -> dict[str, Any]:
                     else "trailing_four_quarter_free_cash_flow"
                 ),
                 "ttm_revenue": decimal_text(revenue_value),
-                "selected_profitability": decimal_text(Decimal(profitability["value_text"])),
+                "selected_profitability": decimal_text(profitability_value),
                 "fundamental_evidence": {
-                    "ttm_revenue": revenue,
-                    "selected_profitability": profitability,
+                    "sharadar_art_revenue": sharadar_art,
+                    "sec_companyfacts_cross_check": observations,
+                    "sec_to_sharadar_revenue_scale_ratio": sec_cross_check_ratio,
                 },
             }
         )
@@ -199,7 +228,7 @@ def build(warehouse: Path, output: Path) -> dict[str, Any]:
 
     artifact = {
         "schema": "corbanu.sec-fundamental-universe.v1",
-        "universe_id": "sec-us-listed-top1000-ttm-revenue-20260827",
+        "universe_id": "sec-registered-us-listed-top1000-4q-revenue-20260828",
         "as_of_date": AS_OF_DATE.isoformat(),
         "company_count": len(selected),
         "source": {
@@ -207,11 +236,13 @@ def build(warehouse: Path, output: Path) -> dict[str, Any]:
             "warehouse_snapshot_id": snapshot_id,
             "companyfacts_archive_sha256": companyfacts_archive_sha256,
             "company_tickers_exchange_source": "https://www.sec.gov/files/company_tickers_exchange.json",
-            "sec_only": True,
+            "fundamentals_provider": "Sharadar SF1",
+            "sharadar_snapshot_sha256": sharadar_snapshot_sha256,
+            "sec_only": False,
         },
         "methodology": {
-            "selection": "top 1,000 eligible U.S.-listed SEC registrants by positive latest TTM revenue",
-            "ttm_definition": "latest ART value explicitly constructed from four exact fiscal quarters",
+            "selection": "top 1,000 eligible U.S.-listed SEC registrants by positive trailing-four-quarter revenue",
+            "ttm_definition": "frozen Sharadar ART revenueusd for size; Sharadar ART FCF or net income divided by fxusd for the profitability overlay",
             "freshness_max_days": MAX_FUNDAMENTAL_AGE_DAYS,
             "eligible_exchanges": sorted(ELIGIBLE_EXCHANGES),
             "excluded_sic": sorted(EXCLUDED_SIC),
@@ -236,8 +267,9 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--warehouse", type=Path, default=DEFAULT_WAREHOUSE)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
+    parser.add_argument("--sharadar-snapshot", type=Path, default=DEFAULT_SHARADAR_SNAPSHOT)
     args = parser.parse_args()
-    artifact = build(args.warehouse, args.output)
+    artifact = build(args.warehouse, args.output, args.sharadar_snapshot)
     print(
         json.dumps(
             {
