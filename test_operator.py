@@ -3,11 +3,13 @@ from decimal import Decimal
 import corbanu_index_operator as corbanu
 
 
-def test_demo_universe_is_stable_and_large_enough() -> None:
-    rows, evidence_hash = corbanu.load_demo_universe(corbanu.DEFAULT_EVIDENCE)
-    assert len(rows) == 108
-    assert len({row["cik"] for row in rows}) == 108
-    assert len(evidence_hash) == 64
+def test_canonical_universe_is_exactly_top_1000() -> None:
+    rows, universe_hash, metadata = corbanu.load_universe(corbanu.DEFAULT_UNIVERSE)
+    assert len(rows) == 1000
+    assert len({row["cik"] for row in rows}) == 1000
+    assert len(universe_hash) == 64
+    assert metadata["company_count"] == 1000
+    assert metadata["id"].startswith("sec-us-listed-top1000")
     assert all(Decimal(row["adjusted_scale"]) > 0 for row in rows)
 
 

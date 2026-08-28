@@ -1,12 +1,12 @@
 # Corbanu Index Operator
 
-Local execution service for the public Corbanu Indexes demo. It binds only to
+Local execution service for Corbanu Indexes. It binds only to
 localhost and is exposed through a narrow HTTPS tunnel. A job compiles the
-mandate, scores the 108-company public demonstration universe on two independent
-H200s under the strict one-request-per-host replay profile, verifies every raw response byte for byte, constructs exact integer
+mandate, scores the canonical top-1,000 SEC-revenue universe on two independent
+H200s in separate 32-request passes under the locked replay profile, verifies every raw response byte for byte, constructs exact integer
 weights, and publishes a content-addressed artifact.
 
-The downloadable artifact includes the exact compiled rubric, all 108 parsed
+The downloadable artifact includes the exact compiled rubric, all 1,000 parsed
 scores and reasoning blocks, and the primary/replay content hashes for every
 company so the aggregate replay claim can be inspected company by company.
 

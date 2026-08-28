@@ -29,10 +29,7 @@ from urllib.parse import urlparse
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_JOBS_DIR = Path("/home/postfiat/var/corbanu-indexes/jobs")
-DEFAULT_EVIDENCE = Path(
-    "/home/postfiat/repos/postfiatorg.github.io/static/benchmarks/"
-    "agentic-index-live-samples-20260827.json"
-)
+DEFAULT_UNIVERSE = ROOT / "data" / "sec_top1000_universe_20260827.json"
 PRIMARY_ENDPOINT = os.environ.get("CORBANU_PRIMARY_ENDPOINT", "http://127.0.0.1:18001")
 REPLAY_ENDPOINT = os.environ.get("CORBANU_REPLAY_ENDPOINT", "http://127.0.0.1:18002")
 MODEL_ID = "Qwen/Qwen3.8-27B-FP8"
@@ -69,35 +66,40 @@ def parse_decimal(value: Any) -> Decimal:
     return Decimal(text or "0")
 
 
-def load_demo_universe(evidence_path: Path) -> tuple[list[dict[str, Any]], str]:
-    evidence_bytes = evidence_path.read_bytes()
-    evidence = json.loads(evidence_bytes)
-    by_cik: dict[str, dict[str, Any]] = {}
-    for index in evidence.get("indexes", []):
-        for row in index.get("constituents", []):
-            cik = str(row["cik"]).zfill(10)
-            source = dict(row.get("weight_inputs") or {})
-            candidate = {
-                "cik": cik,
-                "ticker": str(row["ticker"]).upper(),
-                "company_name": str(row["company_name"]),
-                "accounting_regime": str(row.get("accounting_regime") or "ordinary_operating"),
-                "profitability_factor": str(row.get("profitability_factor") or "free_cash_flow"),
-                "ttm_revenue": str(parse_decimal(source.get("ttm_revenue_display"))),
-                "selected_profitability": str(parse_decimal(source.get("selected_profitability_display"))),
-                "profitability_z_score": str(parse_decimal(source.get("profitability_z_score"))),
-                "profitability_multiplier": str(parse_decimal(source.get("profitability_multiplier"))),
-                "adjusted_scale": str(parse_decimal(source.get("adjusted_scale_display"))),
-            }
-            existing = by_cik.get(cik)
-            if existing is None or (candidate["ticker"], candidate["company_name"]) < (
-                existing["ticker"], existing["company_name"]
-            ):
-                by_cik[cik] = candidate
-    rows = sorted(by_cik.values(), key=lambda row: (row["ticker"], row["cik"]))
-    if len(rows) < 50:
-        raise RuntimeError(f"demo universe unexpectedly small: {len(rows)}")
-    return rows, sha256(evidence_bytes)
+def load_universe(universe_path: Path) -> tuple[list[dict[str, Any]], str, dict[str, Any]]:
+    artifact = json.loads(universe_path.read_bytes())
+    if artifact.get("schema") != "corbanu.sec-fundamental-universe.v1":
+        raise RuntimeError("unsupported universe schema")
+    expected_hash = str(artifact.get("universe_sha256") or "")
+    hash_payload = dict(artifact)
+    hash_payload.pop("universe_sha256", None)
+    if len(expected_hash) != 64 or sha256(canonical_bytes(hash_payload)) != expected_hash:
+        raise RuntimeError("universe content hash does not verify")
+    rows = list(artifact.get("companies") or [])
+    if artifact.get("company_count") != 1000 or len(rows) != 1000:
+        raise RuntimeError(f"canonical universe must contain exactly 1,000 companies; found {len(rows)}")
+    if len({str(row.get("cik")) for row in rows}) != 1000:
+        raise RuntimeError("canonical universe contains duplicate CIKs")
+    required = {
+        "cik", "ticker", "company_name", "accounting_regime", "profitability_factor",
+        "ttm_revenue", "selected_profitability", "profitability_z_score",
+        "profitability_multiplier", "adjusted_scale",
+    }
+    for row in rows:
+        if not required.issubset(row):
+            raise RuntimeError(f"universe row is incomplete for {row.get('ticker', 'unknown')}")
+        if parse_decimal(row["adjusted_scale"]) <= 0:
+            raise RuntimeError(f"universe adjusted scale is invalid for {row['ticker']}")
+    rows.sort(key=lambda row: (str(row["ticker"]), str(row["cik"])))
+    metadata = {
+        "id": artifact["universe_id"],
+        "company_count": len(rows),
+        "as_of_date": artifact["as_of_date"],
+        "universe_sha256": expected_hash,
+        "source": artifact["source"],
+        "methodology": artifact["methodology"],
+    }
+    return rows, expected_hash, metadata
 
 
 RUBRIC_SCHEMA = {
@@ -192,11 +194,13 @@ def score_request(index_request: dict[str, Any], rubric: dict[str, Any], company
             "ticker": company["ticker"],
             "company_name": company["company_name"],
             "sec_cik": company["cik"],
+            "sec_sic": company.get("sec_sic"),
+            "sec_sic_description": company.get("sec_sic_description"),
         },
         "supplemental_transcript_information": {
             "provided": False,
             "text": None,
-            "instruction": "No supplemental transcript is supplied for this public demo run. Do not invent one.",
+            "instruction": "No supplemental transcript is supplied for this run. Do not invent one.",
         },
     }
     return chat_request(
@@ -376,15 +380,15 @@ def validate_request(payload: Any) -> dict[str, Any]:
     if not isinstance(cutoff, int) or not 0 <= cutoff <= 100:
         raise ValueError("relevance cutoff must be an integer from 0 to 100")
     if request.get("construction", {}).get("weighting") != "fundamental":
-        raise ValueError("cap weighting is not enabled in the public local demo; choose Fundamental weighted")
+        raise ValueError("cap weighting is not enabled in the public operator; choose Fundamental weighted")
     request["mandate"] = {"title": title, "phrase": phrase}
     return request
 
 
 class JobStore:
-    def __init__(self, jobs_dir: Path, evidence_path: Path, workers: int) -> None:
+    def __init__(self, jobs_dir: Path, universe_path: Path, workers: int) -> None:
         self.jobs_dir = jobs_dir
-        self.universe, self.evidence_sha256 = load_demo_universe(evidence_path)
+        self.universe, self.universe_sha256, self.universe_metadata = load_universe(universe_path)
         self.workers = workers
         self.pending: queue.Queue[str] = queue.Queue(maxsize=3)
         self.lock = threading.Lock()
@@ -412,7 +416,14 @@ class JobStore:
             atomic_json(self.path(job_id), state)
 
     def submit(self, request: dict[str, Any]) -> tuple[dict[str, Any], bool]:
-        request_hash = sha256(canonical_bytes(request))
+        requested_universe = request.get("universe") or {}
+        if requested_universe.get("id") != self.universe_metadata["id"]:
+            raise ValueError("request universe id does not match the operator's frozen universe")
+        if requested_universe.get("universe_sha256") != self.universe_sha256:
+            raise ValueError("request universe hash does not match the operator's frozen universe")
+        request_hash = sha256(
+            canonical_bytes({"request": request, "universe_sha256": self.universe_sha256})
+        )
         job_id = f"idx_{request_hash[:16]}"
         existing = self.read(job_id)
         if existing:
@@ -430,7 +441,7 @@ class JobStore:
                 return existing, True
             return existing, False
         if self.pending.full():
-            raise RuntimeError("The local demo queue is full. Try again after the current runs finish.")
+            raise RuntimeError("The public operator queue is full. Try again after the current runs finish.")
         state = {
             "job_id": job_id,
             "request_sha256": request_hash,
@@ -440,11 +451,7 @@ class JobStore:
             "created_at_unix": int(time.time()),
             "updated_at_unix": int(time.time()),
             "request": request,
-            "universe": {
-                "id": "corbanu-public-demo-108",
-                "company_count": len(self.universe),
-                "source_evidence_sha256": self.evidence_sha256,
-            },
+            "universe": self.universe_metadata,
         }
         atomic_json(self.path(job_id), state)
         self.pending.put_nowait(job_id)
@@ -490,31 +497,26 @@ class JobStore:
         if primary_rubric.raw.encode("utf-8") != replay_rubric.raw.encode("utf-8"):
             raise RuntimeError("mandate compiler replay was not byte-identical")
         completed += 2
-        self.update(job_id, stage="scoring_primary_and_replay", progress={"completed": completed, "total": total})
+        self.update(job_id, stage="scoring_primary", progress={"completed": completed, "total": total})
 
         results: dict[str, dict[str, Any]] = {}
-        result_lock = threading.Lock()
-        host_slots = {
-            "primary": threading.Semaphore(self.workers),
-            "replay": threading.Semaphore(self.workers),
-        }
 
         def score_one(endpoint: str, host: str, company: dict[str, Any]) -> tuple[str, str, Completion]:
             payload = score_request(request, primary_rubric.parsed, company)
-            with host_slots[host]:
-                response = complete(endpoint, payload)
+            response = complete(endpoint, payload)
             validate_score(response.parsed, company["ticker"])
             return host, company["cik"], response
 
-        futures = []
-        with ThreadPoolExecutor(max_workers=self.workers * 2) as pool:
-            for company in self.universe:
-                futures.append(pool.submit(score_one, PRIMARY_ENDPOINT, "primary", company))
-                futures.append(pool.submit(score_one, REPLAY_ENDPOINT, "replay", company))
-            for future in as_completed(futures):
-                host, cik, response = future.result()
-                with result_lock:
-                    results.setdefault(cik, {})[host] = {
+        # Run each machine as its own ordered pass.  This preserves the proven
+        # 32-request H200 profile without allowing timing on one verifier to
+        # alter the other verifier's batch schedule.
+        for endpoint, host in ((PRIMARY_ENDPOINT, "primary"), (REPLAY_ENDPOINT, "replay")):
+            self.update(job_id, stage=f"scoring_{host}", progress={"completed": completed, "total": total})
+            with ThreadPoolExecutor(max_workers=self.workers) as pool:
+                futures = [pool.submit(score_one, endpoint, host, company) for company in self.universe]
+                for future in as_completed(futures):
+                    result_host, cik, response = future.result()
+                    results.setdefault(cik, {})[result_host] = {
                         "raw": response.raw,
                         "parsed": response.parsed,
                         "request_sha256": response.request_sha256,
@@ -524,7 +526,7 @@ class JobStore:
                     if completed % 8 == 0 or completed == total:
                         self.update(
                             job_id,
-                            stage="scoring_primary_and_replay",
+                            stage=f"scoring_{host}",
                             progress={"completed": completed, "total": total},
                         )
 
@@ -715,10 +717,10 @@ def main() -> None:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8788)
     parser.add_argument("--jobs-dir", type=Path, default=DEFAULT_JOBS_DIR)
-    parser.add_argument("--evidence", type=Path, default=DEFAULT_EVIDENCE)
-    parser.add_argument("--workers-per-host", type=int, default=1)
+    parser.add_argument("--universe", type=Path, default=DEFAULT_UNIVERSE)
+    parser.add_argument("--workers-per-host", type=int, default=32)
     args = parser.parse_args()
-    store = JobStore(args.jobs_dir, args.evidence, args.workers_per_host)
+    store = JobStore(args.jobs_dir, args.universe, args.workers_per_host)
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     server.store = store  # type: ignore[attr-defined]
     print(
