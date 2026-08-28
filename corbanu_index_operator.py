@@ -532,28 +532,84 @@ class JobStore:
 
         score_rows = []
         comparisons = []
+        retry_companies = []
         for company in self.universe:
             pair = results.get(company["cik"], {})
             if set(pair) != {"primary", "replay"}:
                 raise RuntimeError(f"missing replay pair for {company['ticker']}")
             primary = pair["primary"]
             replay = pair["replay"]
-            byte_identical = primary["raw"].encode("utf-8") == replay["raw"].encode("utf-8")
             request_identical = primary["request_sha256"] == replay["request_sha256"]
+            if not request_identical:
+                raise RuntimeError(f"request replay failed for {company['ticker']}")
+            if primary["raw"].encode("utf-8") != replay["raw"].encode("utf-8"):
+                retry_companies.append(company)
+
+        # Concurrent decoding is the fast path, not the acceptance rule. Any
+        # batch-sensitive response is recomputed on otherwise idle machines at
+        # strict concurrency one. The strict pair becomes the canonical score.
+        if retry_companies:
+            self.update(
+                job_id,
+                stage="strict_replay_recovery",
+                progress={"completed": total, "total": total},
+            )
+            for company in retry_companies:
+                payload = score_request(request, primary_rubric.parsed, company)
+                strict_primary = complete(PRIMARY_ENDPOINT, payload)
+                strict_replay = complete(REPLAY_ENDPOINT, payload)
+                validate_score(strict_primary.parsed, company["ticker"])
+                validate_score(strict_replay.parsed, company["ticker"])
+                if strict_primary.request_sha256 != strict_replay.request_sha256:
+                    raise RuntimeError(f"strict request replay failed for {company['ticker']}")
+                if strict_primary.raw.encode("utf-8") != strict_replay.raw.encode("utf-8"):
+                    raise RuntimeError(f"strict byte replay failed for {company['ticker']}")
+                results[company["cik"]]["strict_primary"] = {
+                    "raw": strict_primary.raw,
+                    "parsed": strict_primary.parsed,
+                    "request_sha256": strict_primary.request_sha256,
+                    "content_sha256": strict_primary.content_sha256,
+                }
+                results[company["cik"]]["strict_replay"] = {
+                    "raw": strict_replay.raw,
+                    "parsed": strict_replay.parsed,
+                    "request_sha256": strict_replay.request_sha256,
+                    "content_sha256": strict_replay.content_sha256,
+                }
+
+        for company in self.universe:
+            pair = results[company["cik"]]
+            batch_primary = pair["primary"]
+            batch_replay = pair["replay"]
+            batch_byte_identical = (
+                batch_primary["raw"].encode("utf-8") == batch_replay["raw"].encode("utf-8")
+            )
+            strict_retry = "strict_primary" in pair
+            accepted_primary = pair.get("strict_primary", batch_primary)
+            accepted_replay = pair.get("strict_replay", batch_replay)
+            byte_identical = (
+                accepted_primary["raw"].encode("utf-8") == accepted_replay["raw"].encode("utf-8")
+            )
             comparisons.append(
                 {
                     "cik": company["cik"],
                     "ticker": company["ticker"],
-                    "request_sha256": primary["request_sha256"],
-                    "primary_content_sha256": primary["content_sha256"],
-                    "replay_content_sha256": replay["content_sha256"],
+                    "request_sha256": accepted_primary["request_sha256"],
+                    "primary_content_sha256": accepted_primary["content_sha256"],
+                    "replay_content_sha256": accepted_replay["content_sha256"],
                     "byte_identical": byte_identical,
-                    "request_identical": request_identical,
+                    "request_identical": (
+                        accepted_primary["request_sha256"] == accepted_replay["request_sha256"]
+                    ),
+                    "batch_primary_content_sha256": batch_primary["content_sha256"],
+                    "batch_replay_content_sha256": batch_replay["content_sha256"],
+                    "batch_byte_identical": batch_byte_identical,
+                    "strict_retry": strict_retry,
                 }
             )
-            if not byte_identical or not request_identical:
-                raise RuntimeError(f"byte replay failed for {company['ticker']}")
-            score_rows.append({"cik": company["cik"], **primary["parsed"]})
+            if not byte_identical:
+                raise RuntimeError(f"accepted byte replay failed for {company['ticker']}")
+            score_rows.append({"cik": company["cik"], **accepted_primary["parsed"]})
 
         self.update(job_id, stage="constructing_weights", progress={"completed": total, "total": total})
         holdings = build_weights(request, self.universe, score_rows)
@@ -570,6 +626,8 @@ class JobStore:
             "rubric_primary_content_sha256": primary_rubric.content_sha256,
             "rubric_replay_content_sha256": replay_rubric.content_sha256,
             "rubric_byte_identical": primary_rubric.raw.encode("utf-8") == replay_rubric.raw.encode("utf-8"),
+            "batch_byte_identical_count": sum(int(row["batch_byte_identical"]) for row in comparisons),
+            "strict_retry_count": sum(int(row["strict_retry"]) for row in comparisons),
             "comparisons_sha256": sha256(canonical_bytes(comparisons)),
         }
         stable_artifact = {
@@ -592,6 +650,10 @@ class JobStore:
                 "relevance_cutoff": request["classification"]["relevance_cutoff"],
                 "holding_cap": "0.20",
                 "weight_units": WEIGHT_UNITS,
+                "replay_policy": (
+                    "two independent 32-request passes; any batch mismatch is recomputed on both idle hosts "
+                    "at strict concurrency one and only a byte-identical strict pair is accepted"
+                ),
             },
             "score_vector_sha256": sha256(canonical_bytes(score_vector)),
             "scores": sorted(score_rows, key=lambda row: (row["ticker"], row["cik"])),
