@@ -29,7 +29,7 @@ from urllib.parse import urlparse
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_JOBS_DIR = Path("/home/postfiat/var/corbanu-indexes/jobs")
-DEFAULT_UNIVERSE = ROOT / "data" / "sec_top1000_universe_20260827.json"
+DEFAULT_UNIVERSE = ROOT / "data" / "sec_v81_top1000_universe_20260828.json"
 PRIMARY_ENDPOINT = os.environ.get("CORBANU_PRIMARY_ENDPOINT", "http://127.0.0.1:18001")
 REPLAY_ENDPOINT = os.environ.get("CORBANU_REPLAY_ENDPOINT", "http://127.0.0.1:18002")
 MODEL_ID = "Qwen/Qwen3.8-27B-FP8"
@@ -70,6 +70,10 @@ def load_universe(universe_path: Path) -> tuple[list[dict[str, Any]], str, dict[
     artifact = json.loads(universe_path.read_bytes())
     if artifact.get("schema") != "corbanu.sec-fundamental-universe.v1":
         raise RuntimeError("unsupported universe schema")
+    if (artifact.get("source") or {}).get("sec_only") is not True:
+        raise RuntimeError("canonical universe must be SEC-only")
+    if (artifact.get("source") or {}).get("methodology_version") != "sec-fundamentals-proxy-v81":
+        raise RuntimeError("canonical universe must use validated SEC methodology v81")
     expected_hash = str(artifact.get("universe_sha256") or "")
     hash_payload = dict(artifact)
     hash_payload.pop("universe_sha256", None)
