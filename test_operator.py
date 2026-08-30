@@ -2,6 +2,11 @@ from decimal import Decimal
 import json
 
 import corbanu_index_operator as corbanu
+from build_transcript_snapshot import (
+    sec_period_from_companyfacts,
+    target_accession,
+    validate_provider_transcript,
+)
 
 
 def test_canonical_universe_is_exactly_top_1000() -> None:
@@ -110,3 +115,65 @@ def test_score_request_marks_missing_transcript_explicitly() -> None:
     prompt = payload["messages"][0]["content"]
     assert '"available":false' in prompt
     assert '"transcript_text":null' in prompt
+
+
+def test_sec_period_mapping_converts_fy_to_q4() -> None:
+    payload = {
+        "facts": {
+            "us-gaap": {
+                "Revenue": {
+                    "units": {
+                        "USD": [
+                            {
+                                "end": "2026-05-31",
+                                "accn": "0001193125-26-277521",
+                                "fy": 2026,
+                                "fp": "FY",
+                                "form": "10-K",
+                            }
+                        ]
+                    }
+                }
+            }
+        }
+    }
+    assert sec_period_from_companyfacts(
+        payload,
+        period_end="2026-05-31",
+        accession="0001193125-26-277521",
+    ) == (2026, 4, "10-K")
+
+
+def test_target_accession_uses_annual_source_of_derived_q4() -> None:
+    company = {
+        "ticker": "ORCL",
+        "fundamental_evidence": {
+            "revenue": {
+                "quarters": [
+                    {
+                        "period_end": "2026-05-31",
+                        "accession": (
+                            "0001193125-26-277521;minus:0001193125-26-101045"
+                        ),
+                    }
+                ]
+            }
+        },
+    }
+    assert target_accession(company) == "0001193125-26-277521"
+
+
+def test_nonstandard_long_provider_transcript_is_not_a_false_negative() -> None:
+    def validator(_value):
+        return False, "body_lacks_call_structure", {
+            "chars": 35_709,
+            "nonspace_chars": 30_000,
+            "sha256": "a" * 64,
+        }
+
+    accepted, reason, metadata = validate_provider_transcript(
+        validator, "long investor interview"
+    )
+    assert accepted is True
+    assert reason == "accepted_nonstandard_call_format"
+    assert metadata["chars"] == 35_709
