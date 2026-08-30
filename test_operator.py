@@ -51,6 +51,19 @@ def test_validate_request_rejects_public_cap_weighting() -> None:
         raise AssertionError("cap weighting unexpectedly accepted")
 
 
+def test_public_state_exposes_strict_recovery_progress() -> None:
+    store = object.__new__(corbanu.JobStore)
+    state = {
+        "job_id": "idx_0123456789abcdef",
+        "status": "running",
+        "stage": "strict_replay_recovery",
+        "progress": {"completed": 2002, "total": 2002},
+        "recovery": {"completed": 7, "total": 19},
+    }
+    public = store.public_state(state)
+    assert public["recovery"] == {"completed": 7, "total": 19}
+
+
 def test_score_request_binds_transcript_body_and_hash() -> None:
     request = {
         "mandate": {"title": "Grid", "phrase": "Direct grid modernization exposure"},

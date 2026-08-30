@@ -559,7 +559,7 @@ class JobStore:
     def public_state(self, state: dict[str, Any], include_artifact: bool = False) -> dict[str, Any]:
         keys = (
             "job_id", "request_sha256", "status", "stage", "progress", "created_at_unix",
-            "updated_at_unix", "universe", "error", "result_summary", "artifact_sha256",
+            "updated_at_unix", "universe", "recovery", "error", "result_summary", "artifact_sha256",
         )
         public = {key: state[key] for key in keys if key in state}
         if include_artifact and state.get("status") == "valid" and self.artifact_path(state["job_id"]).exists():
@@ -665,8 +665,9 @@ class JobStore:
                 job_id,
                 stage="strict_replay_recovery",
                 progress={"completed": total, "total": total},
+                recovery={"completed": 0, "total": len(retry_companies)},
             )
-            for company in retry_companies:
+            for recovery_completed, company in enumerate(retry_companies, start=1):
                 payload = score_request(
                     request,
                     primary_rubric.parsed,
@@ -693,6 +694,15 @@ class JobStore:
                     "request_sha256": strict_replay.request_sha256,
                     "content_sha256": strict_replay.content_sha256,
                 }
+                self.update(
+                    job_id,
+                    stage="strict_replay_recovery",
+                    progress={"completed": total, "total": total},
+                    recovery={
+                        "completed": recovery_completed,
+                        "total": len(retry_companies),
+                    },
+                )
 
         for company in self.universe:
             pair = results[company["cik"]]
