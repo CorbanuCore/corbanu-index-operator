@@ -557,6 +557,43 @@ class JobStore:
             raise RuntimeError(f"job and artifact hashes disagree for {job_id}")
         return artifact
 
+    def publication_rejection_reason(
+        self, state: dict[str, Any], artifact: dict[str, Any]
+    ) -> str | None:
+        expected_count = len(self.universe)
+        model = artifact.get("model") or {}
+        proof = artifact.get("replay_proof") or {}
+        request_model = (state.get("request") or {}).get("model") or {}
+        artifact_universe = artifact.get("universe") or {}
+        transcripts = artifact.get("transcripts") or {}
+        checks = (
+            (artifact.get("schema") == "corbanu.index-artifact.v1", "artifact schema is not current"),
+            (artifact.get("valid") is True, "artifact is not marked valid"),
+            (model.get("id") == MODEL_ID, "model id is not admitted"),
+            (model.get("revision") == MODEL_REVISION, "model revision is not admitted"),
+            (model.get("execution_profile") == MODEL_PROFILE, "execution profile is superseded"),
+            (request_model.get("execution") == STRICT_EXECUTION_PROFILE, "strict execution controls are absent"),
+            (artifact_universe.get("universe_sha256") == self.universe_sha256, "universe is superseded"),
+            (
+                transcripts.get("snapshot_sha256") == self.transcript_snapshot_sha256,
+                "transcript snapshot is superseded or absent",
+            ),
+            (len(artifact.get("scores") or []) == expected_count, "score coverage is incomplete"),
+            (
+                len(artifact.get("replay_comparisons") or []) == expected_count,
+                "replay comparison coverage is incomplete",
+            ),
+            (proof.get("comparison_count") == expected_count, "replay count is incomplete"),
+            (proof.get("byte_identical_count") == expected_count, "byte replay is incomplete"),
+            (proof.get("request_identical_count") == expected_count, "request replay is incomplete"),
+            (proof.get("batch_byte_identical_count") == expected_count, "fixed-batch replay is incomplete"),
+            (proof.get("strict_retry_count") == 0, "strict recovery was required"),
+        )
+        for passed, reason in checks:
+            if not passed:
+                return reason
+        return None
+
     def list_valid_indexes(self) -> dict[str, Any]:
         rows = []
         for path in sorted(self.jobs_dir.glob("idx_*/job.json")):
@@ -565,6 +602,8 @@ class JobStore:
                 continue
             artifact = self.verified_artifact(str(state["job_id"]))
             if artifact is None:
+                continue
+            if self.publication_rejection_reason(state, artifact) is not None:
                 continue
             model = artifact.get("model") or {}
             proof = artifact.get("replay_proof") or {}
@@ -611,6 +650,8 @@ class JobStore:
         state = self.read(job_id)
         artifact = self.verified_artifact(job_id)
         if state is None or artifact is None:
+            return None
+        if self.publication_rejection_reason(state, artifact) is not None:
             return None
         scores = {
             (str(row["cik"]), str(row["ticker"])): row
@@ -1080,11 +1121,18 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 self.send_json(HTTPStatus.OK, recipe)
                 return
-            artifact_path = self.store.artifact_path(match.group(1))
-            if state.get("status") != "valid" or not artifact_path.exists():
+            artifact = self.store.verified_artifact(match.group(1))
+            if artifact is None:
                 self.send_json(HTTPStatus.CONFLICT, {"error": "artifact is not valid yet"})
                 return
-            self.send_json(HTTPStatus.OK, json.loads(artifact_path.read_text()))
+            rejection_reason = self.store.publication_rejection_reason(state, artifact)
+            if rejection_reason is not None:
+                self.send_json(
+                    HTTPStatus.CONFLICT,
+                    {"error": "artifact is archived and not published", "reason": rejection_reason},
+                )
+                return
+            self.send_json(HTTPStatus.OK, artifact)
             return
         self.send_json(HTTPStatus.OK, self.store.public_state(state))
 

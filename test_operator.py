@@ -140,6 +140,7 @@ def test_registry_and_replay_recipe_use_verified_artifact(tmp_path: Path) -> Non
         "replay_proof": {
             "comparison_count": 1,
             "byte_identical_count": 1,
+            "request_identical_count": 1,
             "batch_byte_identical_count": 1,
             "strict_retry_count": 0,
             "comparisons_sha256": "8" * 64,
@@ -175,6 +176,9 @@ def test_registry_and_replay_recipe_use_verified_artifact(tmp_path: Path) -> Non
 
     store = object.__new__(corbanu.JobStore)
     store.jobs_dir = tmp_path
+    store.universe = [{"cik": "0000000001"}]
+    store.universe_sha256 = "4" * 64
+    store.transcript_snapshot_sha256 = "5" * 64
     registry = store.list_valid_indexes()
     assert registry["index_count"] == 1
     assert registry["indexes"][0]["current_admitted_profile"] is True
@@ -188,6 +192,21 @@ def test_registry_and_replay_recipe_use_verified_artifact(tmp_path: Path) -> Non
     stable_recipe = dict(recipe)
     recipe_hash = stable_recipe.pop("recipe_sha256")
     assert corbanu.sha256(corbanu.canonical_bytes(stable_recipe)) == recipe_hash
+
+    legacy_stable = dict(stable_artifact)
+    legacy_stable["model"] = {
+        **stable_artifact["model"],
+        "execution_profile": "superseded-profile",
+    }
+    legacy_hash = corbanu.sha256(corbanu.canonical_bytes(legacy_stable))
+    legacy_artifact = {**legacy_stable, "artifact_sha256": legacy_hash}
+    state["artifact_sha256"] = legacy_hash
+    (job_dir / "artifact.json").write_bytes(
+        corbanu.canonical_bytes(legacy_artifact) + b"\n"
+    )
+    (job_dir / "job.json").write_bytes(corbanu.canonical_bytes(state) + b"\n")
+    assert store.list_valid_indexes()["index_count"] == 0
+    assert store.replay_recipe(job_id) is None
 
 
 def test_score_request_binds_transcript_body_and_hash() -> None:
