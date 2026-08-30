@@ -30,6 +30,10 @@ from urllib.parse import urlparse
 ROOT = Path(__file__).resolve().parent
 DEFAULT_JOBS_DIR = Path("/home/postfiat/var/corbanu-indexes/jobs")
 DEFAULT_UNIVERSE = ROOT / "data" / "sec_v81_top1000_universe_20260828.json"
+DEFAULT_TRANSCRIPTS = Path(
+    "/home/postfiat/var/corbanu-indexes/transcripts/"
+    "sec_v81_top1000_transcripts_20260830.json"
+)
 PRIMARY_ENDPOINT = os.environ.get("CORBANU_PRIMARY_ENDPOINT", "http://127.0.0.1:18001")
 REPLAY_ENDPOINT = os.environ.get("CORBANU_REPLAY_ENDPOINT", "http://127.0.0.1:18002")
 MODEL_ID = "Qwen/Qwen3.8-27B-FP8"
@@ -44,6 +48,7 @@ ALLOWED_ORIGINS = {
 ANCHORS = (0, 25, 50, 75, 100)
 WEIGHT_UNITS = 1_000_000_000_000
 HOLDING_CAP = Decimal("0.20")
+RANDOM_SEED = 438916795
 
 
 def canonical_bytes(value: Any) -> bytes:
@@ -106,6 +111,57 @@ def load_universe(universe_path: Path) -> tuple[list[dict[str, Any]], str, dict[
     return rows, expected_hash, metadata
 
 
+def load_transcripts(
+    transcript_path: Path, universe: list[dict[str, Any]]
+) -> tuple[dict[str, dict[str, Any]], str, dict[str, Any]]:
+    artifact = json.loads(transcript_path.read_bytes())
+    if artifact.get("schema") != "corbanu.transcript-snapshot.v1":
+        raise RuntimeError("unsupported transcript snapshot schema")
+    expected_hash = str(artifact.get("snapshot_sha256") or "")
+    hash_payload = dict(artifact)
+    hash_payload.pop("snapshot_sha256", None)
+    if len(expected_hash) != 64 or sha256(canonical_bytes(hash_payload)) != expected_hash:
+        raise RuntimeError("transcript snapshot content hash does not verify")
+    records = list(artifact.get("records") or [])
+    universe_ciks = {str(row["cik"]) for row in universe}
+    record_ciks = [str(row.get("cik") or "") for row in records]
+    if len(records) != len(universe) or set(record_ciks) != universe_ciks:
+        raise RuntimeError("transcript snapshot must contain exactly one record per universe CIK")
+    if len(set(record_ciks)) != len(record_ciks):
+        raise RuntimeError("transcript snapshot contains duplicate CIKs")
+    output: dict[str, dict[str, Any]] = {}
+    available = 0
+    for record in records:
+        cik = str(record["cik"])
+        is_available = record.get("available") is True
+        text = record.get("transcript_text")
+        if is_available:
+            if record.get("provider") not in {"earningscall.biz", "fmp"}:
+                raise RuntimeError(f"unsupported transcript provider for {cik}")
+            if not isinstance(text, str) or len(text.strip()) < 1_000:
+                raise RuntimeError(f"available transcript body is invalid for {cik}")
+            if sha256(text.encode("utf-8")) != record.get("transcript_sha256"):
+                raise RuntimeError(f"transcript body hash does not verify for {cik}")
+            if len(text) != int(record.get("transcript_chars") or -1):
+                raise RuntimeError(f"transcript character count does not verify for {cik}")
+            available += 1
+        else:
+            forbidden = ("provider", "transcript_sha256", "transcript_text")
+            if any(record.get(key) is not None for key in forbidden):
+                raise RuntimeError(f"unavailable transcript record is not empty for {cik}")
+        output[cik] = record
+    metadata = {
+        "id": artifact.get("snapshot_id"),
+        "snapshot_sha256": expected_hash,
+        "record_count": len(records),
+        "available_count": available,
+        "unavailable_count": len(records) - available,
+        "source": artifact.get("source"),
+        "selection_rule": artifact.get("selection_rule"),
+    }
+    return output, expected_hash, metadata
+
+
 RUBRIC_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
@@ -133,18 +189,32 @@ SCORE_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
     "properties": {
-        "ticker": {"type": "string"},
-        "score": {"type": "integer", "enum": list(ANCHORS)},
+        "score": {"type": "integer", "minimum": 0, "maximum": 100},
         "confidence": {"type": "integer", "minimum": 0, "maximum": 100},
         "reasoning_block": {
             "type": "array",
             "minItems": 3,
-            "maxItems": 3,
+            "maxItems": 8,
             "items": {"type": "string"},
         },
     },
-    "required": ["ticker", "score", "confidence", "reasoning_block"],
+    "required": ["score", "confidence", "reasoning_block"],
 }
+
+GENERIC_SCORING_PROMPT_PREFIX = """You are a deterministic thematic-company scorer. Evaluate the supplied company against the supplied thematic basket. Apply the supplied scoring rubric exactly as written. Do not modify, tighten, relax, replace, or add scoring criteria. Supplemental transcript information is additional information about the supplied company to use when applying the rubric.
+
+INPUT JSON:
+"""
+
+GENERIC_SCORING_PROMPT_SUFFIX = """
+
+OUTPUT REQUIREMENTS:
+Return only one valid JSON object with exactly these fields:
+- "score": an integer from 0 through 100 produced by applying the supplied scoring rubric exactly;
+- "confidence": an integer from 0 through 100 representing confidence in the score;
+- "reasoning_block": an array containing at least three substantive strings, with each string constituting one paragraph of reasoning about the score.
+
+The score must be directly extractable from the top-level "score" field. Do not output Markdown or any text outside the JSON object."""
 
 
 def chat_request(messages: list[dict[str, str]], schema_name: str, schema: dict[str, Any], max_tokens: int) -> dict[str, Any]:
@@ -152,6 +222,7 @@ def chat_request(messages: list[dict[str, str]], schema_name: str, schema: dict[
         "model": MODEL_ID,
         "temperature": 0,
         "top_p": 1,
+        "seed": RANDOM_SEED,
         "max_tokens": max_tokens,
         "chat_template_kwargs": {"enable_thinking": False},
         "messages": messages,
@@ -189,7 +260,34 @@ def rubric_request(index_request: dict[str, Any]) -> dict[str, Any]:
     )
 
 
-def score_request(index_request: dict[str, Any], rubric: dict[str, Any], company: dict[str, Any]) -> dict[str, Any]:
+def score_request(
+    index_request: dict[str, Any],
+    rubric: dict[str, Any],
+    company: dict[str, Any],
+    transcript: dict[str, Any],
+) -> dict[str, Any]:
+    if transcript.get("available") is True:
+        supplemental = {
+            "available": True,
+            "provider": transcript["provider"],
+            "fiscal_year": transcript.get("fiscal_year"),
+            "fiscal_quarter": transcript.get("fiscal_quarter"),
+            "source_url": transcript.get("source_url"),
+            "transcript_sha256": transcript["transcript_sha256"],
+            "transcript_chars": transcript["transcript_chars"],
+            "transcript_text": transcript["transcript_text"],
+        }
+    else:
+        supplemental = {
+            "available": False,
+            "provider": None,
+            "fiscal_year": None,
+            "fiscal_quarter": None,
+            "source_url": None,
+            "transcript_sha256": None,
+            "transcript_chars": 0,
+            "transcript_text": None,
+        }
     input_packet = {
         "index_title": index_request["mandate"]["title"],
         "index_mandate": index_request["mandate"]["phrase"],
@@ -201,29 +299,15 @@ def score_request(index_request: dict[str, Any], rubric: dict[str, Any], company
             "sec_sic": company.get("sec_sic"),
             "sec_sic_description": company.get("sec_sic_description"),
         },
-        "supplemental_transcript_information": {
-            "provided": False,
-            "text": None,
-            "instruction": "No supplemental transcript is supplied for this run. Do not invent one.",
-        },
+        "supplemental_transcript_information": supplemental,
     }
+    actual_prompt = (
+        GENERIC_SCORING_PROMPT_PREFIX
+        + canonical_bytes(input_packet).decode("utf-8")
+        + GENERIC_SCORING_PROMPT_SUFFIX
+    )
     return chat_request(
-        [
-            {
-                "role": "system",
-                "content": (
-                    "You are the deterministic company scorer for a thematic equity index. Apply EXACTLY "
-                    "the locked scoring rubric supplied by the user. Use the company's widely known identity, "
-                    "products, services, technologies, industry role, and strategic direction from your training "
-                    "data. Supplemental transcript text, when supplied, grounds and updates that knowledge; when "
-                    "it is absent, score from durable training knowledge and state uncertainty honestly. Financial "
-                    "size and profitability do not determine thematic relevance and must not affect the score. "
-                    "Return the ticker exactly, one anchor score (0, 25, 50, 75, or 100), a confidence from 0 to "
-                    "100, and exactly three substantive reasoning paragraphs. Return only JSON matching the schema."
-                ),
-            },
-            {"role": "user", "content": json.dumps(input_packet, sort_keys=True, ensure_ascii=False)},
-        ],
+        [{"role": "user", "content": actual_prompt}],
         "thematic_company_score",
         SCORE_SCHEMA,
         1800,
@@ -274,16 +358,14 @@ def validate_rubric(value: dict[str, Any]) -> None:
 
 
 def validate_score(value: dict[str, Any], ticker: str) -> None:
-    if set(value) != {"ticker", "score", "confidence", "reasoning_block"}:
+    if set(value) != {"score", "confidence", "reasoning_block"}:
         raise ValueError(f"score fields invalid for {ticker}")
-    if str(value["ticker"]).upper() != ticker:
-        raise ValueError(f"ticker mismatch for {ticker}")
-    if value["score"] not in ANCHORS:
-        raise ValueError(f"score is not an anchor for {ticker}")
+    if isinstance(value["score"], bool) or not isinstance(value["score"], int) or not 0 <= value["score"] <= 100:
+        raise ValueError(f"score is invalid for {ticker}")
     if not isinstance(value["confidence"], int) or not 0 <= value["confidence"] <= 100:
         raise ValueError(f"confidence invalid for {ticker}")
     paragraphs = value["reasoning_block"]
-    if not isinstance(paragraphs, list) or len(paragraphs) != 3 or any(len(str(p)) < 80 for p in paragraphs):
+    if not isinstance(paragraphs, list) or not 3 <= len(paragraphs) <= 8 or any(len(str(p)) < 80 for p in paragraphs):
         raise ValueError(f"reasoning block invalid for {ticker}")
 
 
@@ -349,6 +431,7 @@ def build_weights(
             "score": int(result["score"]),
             "confidence": int(result["confidence"]),
             "reasoning_block": result["reasoning_block"],
+            "transcript": result["transcript"],
             "accounting_regime": company["accounting_regime"],
             "profitability_factor": company["profitability_factor"],
             "ttm_revenue": company["ttm_revenue"],
@@ -390,9 +473,14 @@ def validate_request(payload: Any) -> dict[str, Any]:
 
 
 class JobStore:
-    def __init__(self, jobs_dir: Path, universe_path: Path, workers: int) -> None:
+    def __init__(self, jobs_dir: Path, universe_path: Path, transcript_path: Path, workers: int) -> None:
         self.jobs_dir = jobs_dir
         self.universe, self.universe_sha256, self.universe_metadata = load_universe(universe_path)
+        (
+            self.transcripts,
+            self.transcript_snapshot_sha256,
+            self.transcript_metadata,
+        ) = load_transcripts(transcript_path, self.universe)
         self.workers = workers
         self.pending: queue.Queue[str] = queue.Queue(maxsize=3)
         self.lock = threading.Lock()
@@ -426,7 +514,13 @@ class JobStore:
         if requested_universe.get("universe_sha256") != self.universe_sha256:
             raise ValueError("request universe hash does not match the operator's frozen universe")
         request_hash = sha256(
-            canonical_bytes({"request": request, "universe_sha256": self.universe_sha256})
+            canonical_bytes(
+                {
+                    "request": request,
+                    "universe_sha256": self.universe_sha256,
+                    "transcript_snapshot_sha256": self.transcript_snapshot_sha256,
+                }
+            )
         )
         job_id = f"idx_{request_hash[:16]}"
         existing = self.read(job_id)
@@ -456,6 +550,7 @@ class JobStore:
             "updated_at_unix": int(time.time()),
             "request": request,
             "universe": self.universe_metadata,
+            "transcripts": self.transcript_metadata,
         }
         atomic_json(self.path(job_id), state)
         self.pending.put_nowait(job_id)
@@ -506,18 +601,32 @@ class JobStore:
         results: dict[str, dict[str, Any]] = {}
 
         def score_one(endpoint: str, host: str, company: dict[str, Any]) -> tuple[str, str, Completion]:
-            payload = score_request(request, primary_rubric.parsed, company)
+            payload = score_request(
+                request,
+                primary_rubric.parsed,
+                company,
+                self.transcripts[company["cik"]],
+            )
             response = complete(endpoint, payload)
             validate_score(response.parsed, company["ticker"])
             return host, company["cik"], response
 
-        # Run each machine as its own ordered pass.  This preserves the proven
-        # 32-request H200 profile without allowing timing on one verifier to
-        # alter the other verifier's batch schedule.
-        for endpoint, host in ((PRIMARY_ENDPOINT, "primary"), (REPLAY_ENDPOINT, "replay")):
-            self.update(job_id, stage=f"scoring_{host}", progress={"completed": completed, "total": total})
-            with ThreadPoolExecutor(max_workers=self.workers) as pool:
-                futures = [pool.submit(score_one, endpoint, host, company) for company in self.universe]
+        # Both verifiers receive the same fixed batch membership before either
+        # advances. This preserves the admitted 32-request profile while
+        # preventing two independently scheduled 1,000-name passes from
+        # creating artificial batch-context differences.
+        for start in range(0, len(self.universe), self.workers):
+            batch = self.universe[start : start + self.workers]
+            self.update(
+                job_id,
+                stage="scoring_lockstep_replay",
+                progress={"completed": completed, "total": total},
+            )
+            with ThreadPoolExecutor(max_workers=len(batch) * 2) as pool:
+                futures = []
+                for company in batch:
+                    futures.append(pool.submit(score_one, PRIMARY_ENDPOINT, "primary", company))
+                    futures.append(pool.submit(score_one, REPLAY_ENDPOINT, "replay", company))
                 for future in as_completed(futures):
                     result_host, cik, response = future.result()
                     results.setdefault(cik, {})[result_host] = {
@@ -527,12 +636,11 @@ class JobStore:
                         "content_sha256": response.content_sha256,
                     }
                     completed += 1
-                    if completed % 8 == 0 or completed == total:
-                        self.update(
-                            job_id,
-                            stage=f"scoring_{host}",
-                            progress={"completed": completed, "total": total},
-                        )
+            self.update(
+                job_id,
+                stage="scoring_lockstep_replay",
+                progress={"completed": completed, "total": total},
+            )
 
         score_rows = []
         comparisons = []
@@ -559,7 +667,12 @@ class JobStore:
                 progress={"completed": total, "total": total},
             )
             for company in retry_companies:
-                payload = score_request(request, primary_rubric.parsed, company)
+                payload = score_request(
+                    request,
+                    primary_rubric.parsed,
+                    company,
+                    self.transcripts[company["cik"]],
+                )
                 strict_primary = complete(PRIMARY_ENDPOINT, payload)
                 strict_replay = complete(REPLAY_ENDPOINT, payload)
                 validate_score(strict_primary.parsed, company["ticker"])
@@ -613,7 +726,22 @@ class JobStore:
             )
             if not byte_identical:
                 raise RuntimeError(f"accepted byte replay failed for {company['ticker']}")
-            score_rows.append({"cik": company["cik"], **accepted_primary["parsed"]})
+            transcript = self.transcripts[company["cik"]]
+            score_rows.append(
+                {
+                    "cik": company["cik"],
+                    "ticker": company["ticker"],
+                    **accepted_primary["parsed"],
+                    "raw_model_output": accepted_primary["raw"],
+                    "transcript": {
+                        "available": bool(transcript["available"]),
+                        "provider": transcript.get("provider"),
+                        "fiscal_year": transcript.get("fiscal_year"),
+                        "fiscal_quarter": transcript.get("fiscal_quarter"),
+                        "sha256": transcript.get("transcript_sha256"),
+                    },
+                }
+            )
 
         self.update(job_id, stage="constructing_weights", progress={"completed": total, "total": total})
         holdings = build_weights(request, self.universe, score_rows)
@@ -647,6 +775,7 @@ class JobStore:
             "rubric_content_sha256": primary_rubric.content_sha256,
             "model": {"id": MODEL_ID, "revision": MODEL_REVISION, "execution_profile": MODEL_PROFILE},
             "universe": state["universe"],
+            "transcripts": state["transcripts"],
             "construction": {
                 "weighting": "fundamental",
                 "formula": "score_multiplier * TTM revenue * exp(0.03 * selected profitability population z-score)",
@@ -784,9 +913,10 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=8788)
     parser.add_argument("--jobs-dir", type=Path, default=DEFAULT_JOBS_DIR)
     parser.add_argument("--universe", type=Path, default=DEFAULT_UNIVERSE)
+    parser.add_argument("--transcripts", type=Path, default=DEFAULT_TRANSCRIPTS)
     parser.add_argument("--workers-per-host", type=int, default=32)
     args = parser.parse_args()
-    store = JobStore(args.jobs_dir, args.universe, args.workers_per_host)
+    store = JobStore(args.jobs_dir, args.universe, args.transcripts, args.workers_per_host)
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     server.store = store  # type: ignore[attr-defined]
     print(

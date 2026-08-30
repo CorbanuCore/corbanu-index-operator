@@ -1,4 +1,5 @@
 from decimal import Decimal
+import json
 
 import corbanu_index_operator as corbanu
 
@@ -43,3 +44,69 @@ def test_validate_request_rejects_public_cap_weighting() -> None:
         assert "cap weighting" in str(error)
     else:
         raise AssertionError("cap weighting unexpectedly accepted")
+
+
+def test_score_request_binds_transcript_body_and_hash() -> None:
+    request = {
+        "mandate": {"title": "Grid", "phrase": "Direct grid modernization exposure"},
+    }
+    rubric = {
+        "basket_description": "Direct exposure to grid modernization infrastructure.",
+        "scoring_heuristic": "Score direct strategic exposure to the stated theme.",
+        "score_0": "No exposure to grid infrastructure or related services.",
+        "score_25": "Incidental exposure with no material strategic importance.",
+        "score_50": "Material exposure, but not a major strategic business pillar.",
+        "score_75": "Direct exposure that is a major strategic business pillar.",
+        "score_100": "A defining pure-play exposure to grid modernization infrastructure.",
+    }
+    company = {"ticker": "GEV", "company_name": "GE Vernova", "cik": "0001996810"}
+    body = "Operator: " + "grid modernization and transformers " * 100
+    transcript = {
+        "available": True,
+        "provider": "earningscall.biz",
+        "fiscal_year": 2026,
+        "fiscal_quarter": 2,
+        "source_url": "https://example.invalid/transcript",
+        "transcript_sha256": corbanu.sha256(body.encode()),
+        "transcript_chars": len(body),
+        "transcript_text": body,
+    }
+    payload = corbanu.score_request(request, rubric, company, transcript)
+    prompt = payload["messages"][0]["content"]
+    assert corbanu.GENERIC_SCORING_PROMPT_PREFIX in prompt
+    assert corbanu.GENERIC_SCORING_PROMPT_SUFFIX in prompt
+    input_text = prompt.removeprefix(corbanu.GENERIC_SCORING_PROMPT_PREFIX).removesuffix(
+        corbanu.GENERIC_SCORING_PROMPT_SUFFIX
+    )
+    packet = json.loads(input_text)
+    assert packet["company"]["ticker"] == "GEV"
+    assert packet["supplemental_transcript_information"]["transcript_text"] == body
+    assert packet["supplemental_transcript_information"]["transcript_sha256"] == transcript["transcript_sha256"]
+
+
+def test_score_request_marks_missing_transcript_explicitly() -> None:
+    request = {"mandate": {"title": "Grid", "phrase": "Direct grid exposure"}}
+    rubric = {
+        "basket_description": "Direct exposure to grid modernization infrastructure.",
+        "scoring_heuristic": "Score direct strategic exposure to the stated theme.",
+        "score_0": "No exposure to grid infrastructure or related services.",
+        "score_25": "Incidental exposure with no material strategic importance.",
+        "score_50": "Material exposure, but not a major strategic business pillar.",
+        "score_75": "Direct exposure that is a major strategic business pillar.",
+        "score_100": "A defining pure-play exposure to grid modernization infrastructure.",
+    }
+    company = {"ticker": "NONE", "company_name": "No Transcript", "cik": "0000000001"}
+    transcript = {
+        "available": False,
+        "provider": None,
+        "fiscal_year": None,
+        "fiscal_quarter": None,
+        "source_url": None,
+        "transcript_sha256": None,
+        "transcript_chars": 0,
+        "transcript_text": None,
+    }
+    payload = corbanu.score_request(request, rubric, company, transcript)
+    prompt = payload["messages"][0]["content"]
+    assert '"available":false' in prompt
+    assert '"transcript_text":null' in prompt
