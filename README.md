@@ -54,3 +54,9 @@ Run the bounded two-verifier sample without starting the API:
 ```bash
 python3 run_transcript_sample.py
 ```
+
+Before provisioning or restarting either H200, follow
+[`docs/H200_REPLAY_RUNBOOK.md`](docs/H200_REPLAY_RUNBOOK.md). The server is
+admitted only under the committed strict fixed-32 launch profile and after its
+two-host byte-replay canary passes. `--enable-deterministic-inference` by itself
+is not an admitted configuration.

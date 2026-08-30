@@ -1,5 +1,6 @@
 from decimal import Decimal
 import json
+from pathlib import Path
 
 import corbanu_index_operator as corbanu
 from build_transcript_snapshot import (
@@ -7,6 +8,25 @@ from build_transcript_snapshot import (
     target_accession,
     validate_provider_transcript,
 )
+
+
+ROOT = Path(__file__).resolve().parent
+
+
+def test_h200_bootstrap_contains_complete_strict_fixed32_profile() -> None:
+    script = (ROOT / "ops" / "vast_qwen38_fp8_fixed32_strict_onstart.sh").read_text()
+    required = (
+        "--max-running-requests 32",
+        "--attention-backend triton",
+        "--enable-deterministic-inference",
+        "--disable-radix-cache",
+        "--disable-overlap-schedule",
+        "--disable-prefill-cuda-graph",
+        "--disable-decode-cuda-graph",
+        "--random-seed 438916795",
+    )
+    assert all(flag in script for flag in required)
+    assert "--attention-backend fa3" not in script
 
 
 def test_canonical_universe_is_exactly_top_1000() -> None:
