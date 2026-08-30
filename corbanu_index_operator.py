@@ -38,7 +38,7 @@ PRIMARY_ENDPOINT = os.environ.get("CORBANU_PRIMARY_ENDPOINT", "http://127.0.0.1:
 REPLAY_ENDPOINT = os.environ.get("CORBANU_REPLAY_ENDPOINT", "http://127.0.0.1:18002")
 MODEL_ID = "Qwen/Qwen3.8-27B-FP8"
 MODEL_REVISION = "017b9c7af6b5689d5dd426a76e0bc077eb5ca20a"
-MODEL_PROFILE = "qwen3.8-27b-fp8-h200-sglang-deterministic-noradix-schema-v1"
+MODEL_PROFILE = "qwen3.8-27b-fp8-h200-sglang-strict-fixed32-schema-v2"
 ALLOWED_ORIGINS = {
     "https://corbanu.com",
     "https://www.corbanu.com",
@@ -49,6 +49,31 @@ ANCHORS = (0, 25, 50, 75, 100)
 WEIGHT_UNITS = 1_000_000_000_000
 HOLDING_CAP = Decimal("0.20")
 RANDOM_SEED = 438916795
+WORKERS_PER_HOST = 32
+STRICT_EXECUTION_PROFILE = {
+    "runtime_image": (
+        "lmsysorg/sglang:nightly-dev-cu13-20260817-d91c3682"
+        "@sha256:fa8774dd128600a09fd6d46670b06fb69a55dac8a3881e50ccf0916a45eb39af"
+    ),
+    "hardware": "NVIDIA H200",
+    "deterministic_inference": True,
+    "max_running_requests": 32,
+    "request_batch_size_per_host": 32,
+    "attention_backend": "triton",
+    "linear_attention_backend": "triton",
+    "temperature": 0,
+    "top_p": 1,
+    "random_seed": RANDOM_SEED,
+    "acceptance_replay": (
+        "two independent fixed 32-request passes; every accepted raw UTF-8 response "
+        "must have a byte-identical replay partner"
+    ),
+    "thinking": False,
+    "radix_cache": False,
+    "overlap_schedule": False,
+    "decode_cuda_graph": False,
+    "prefill_cuda_graph": False,
+}
 
 
 def canonical_bytes(value: Any) -> bytes:
@@ -463,6 +488,8 @@ def validate_request(payload: Any) -> dict[str, Any]:
         raise ValueError("the local operator currently accepts only the admitted Qwen model revision")
     if request.get("model", {}).get("execution_profile") != MODEL_PROFILE:
         raise ValueError("model execution profile is not admitted")
+    if request.get("model", {}).get("execution") != STRICT_EXECUTION_PROFILE:
+        raise ValueError("model execution controls do not match the admitted strict fixed-32 profile")
     cutoff = request.get("classification", {}).get("relevance_cutoff")
     if not isinstance(cutoff, int) or not 0 <= cutoff <= 100:
         raise ValueError("relevance cutoff must be an integer from 0 to 100")
@@ -474,6 +501,8 @@ def validate_request(payload: Any) -> dict[str, Any]:
 
 class JobStore:
     def __init__(self, jobs_dir: Path, universe_path: Path, transcript_path: Path, workers: int) -> None:
+        if workers != WORKERS_PER_HOST:
+            raise ValueError(f"workers per host must be exactly {WORKERS_PER_HOST}")
         self.jobs_dir = jobs_dir
         self.universe, self.universe_sha256, self.universe_metadata = load_universe(universe_path)
         (
@@ -485,8 +514,27 @@ class JobStore:
         self.pending: queue.Queue[str] = queue.Queue(maxsize=3)
         self.lock = threading.Lock()
         self.jobs_dir.mkdir(parents=True, exist_ok=True)
+        self._fail_interrupted_jobs()
         self.worker = threading.Thread(target=self._worker_loop, daemon=True, name="corbanu-index-worker")
         self.worker.start()
+
+    def _fail_interrupted_jobs(self) -> None:
+        for path in sorted(self.jobs_dir.glob("idx_*/job.json")):
+            state = json.loads(path.read_text())
+            if state.get("status") not in {"queued", "running"}:
+                continue
+            state.update(
+                {
+                    "status": "failed",
+                    "stage": "interrupted",
+                    "error": (
+                        "The operator restarted before this run completed. "
+                        "Submit the request again under the current admitted profile."
+                    ),
+                    "updated_at_unix": int(time.time()),
+                }
+            )
+            atomic_json(path, state)
 
     def path(self, job_id: str) -> Path:
         return self.jobs_dir / job_id / "job.json"
@@ -924,7 +972,7 @@ def main() -> None:
     parser.add_argument("--jobs-dir", type=Path, default=DEFAULT_JOBS_DIR)
     parser.add_argument("--universe", type=Path, default=DEFAULT_UNIVERSE)
     parser.add_argument("--transcripts", type=Path, default=DEFAULT_TRANSCRIPTS)
-    parser.add_argument("--workers-per-host", type=int, default=32)
+    parser.add_argument("--workers-per-host", type=int, default=WORKERS_PER_HOST)
     args = parser.parse_args()
     store = JobStore(args.jobs_dir, args.universe, args.transcripts, args.workers_per_host)
     server = ThreadingHTTPServer((args.host, args.port), Handler)

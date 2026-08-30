@@ -58,7 +58,9 @@ match in a small sample:
    sha256sum ops/vast_qwen38_fp8_fixed32_strict_onstart.sh
    ```
 
-4. Run that script on each host. It writes the model path, GPU information,
+4. Run that script on each host. It safely replaces at most one existing
+   SGLang server; it refuses to proceed if multiple server processes exist. It
+   writes the model path, GPU information,
    package versions, strict launch profile, and server log under
    `/workspace/postfiat-sec-index-qwen38-fp8-fixed32/runtime/`.
 5. Forward each host's loopback port 8000 to separate local ports. The operator

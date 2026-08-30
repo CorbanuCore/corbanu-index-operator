@@ -13,6 +13,23 @@ from build_transcript_snapshot import (
 ROOT = Path(__file__).resolve().parent
 
 
+def admitted_request(*, weighting: str = "fundamental") -> dict:
+    return {
+        "request": {
+            "schema": "corbanu.index-request.v1",
+            "mandate": {"title": "Test index", "phrase": "Direct exposure to test infrastructure"},
+            "classification": {"relevance_cutoff": 70},
+            "construction": {"weighting": weighting},
+            "model": {
+                "id": corbanu.MODEL_ID,
+                "revision": corbanu.MODEL_REVISION,
+                "execution_profile": corbanu.MODEL_PROFILE,
+                "execution": corbanu.STRICT_EXECUTION_PROFILE.copy(),
+            },
+        }
+    }
+
+
 def test_h200_bootstrap_contains_complete_strict_fixed32_profile() -> None:
     script = (ROOT / "ops" / "vast_qwen38_fp8_fixed32_strict_onstart.sh").read_text()
     required = (
@@ -50,25 +67,24 @@ def test_capped_weights_sum_exactly() -> None:
 
 
 def test_validate_request_rejects_public_cap_weighting() -> None:
-    request = {
-        "request": {
-            "schema": "corbanu.index-request.v1",
-            "mandate": {"title": "Test index", "phrase": "Direct exposure to test infrastructure"},
-            "classification": {"relevance_cutoff": 70},
-            "construction": {"weighting": "market_cap"},
-            "model": {
-                "id": corbanu.MODEL_ID,
-                "revision": corbanu.MODEL_REVISION,
-                "execution_profile": corbanu.MODEL_PROFILE,
-            },
-        }
-    }
+    request = admitted_request(weighting="market_cap")
     try:
         corbanu.validate_request(request)
     except ValueError as error:
         assert "cap weighting" in str(error)
     else:
         raise AssertionError("cap weighting unexpectedly accepted")
+
+
+def test_validate_request_rejects_partial_deterministic_profile() -> None:
+    request = admitted_request()
+    request["request"]["model"]["execution"]["overlap_schedule"] = True
+    try:
+        corbanu.validate_request(request)
+    except ValueError as error:
+        assert "strict fixed-32 profile" in str(error)
+    else:
+        raise AssertionError("partial deterministic profile unexpectedly accepted")
 
 
 def test_public_state_exposes_strict_recovery_progress() -> None:

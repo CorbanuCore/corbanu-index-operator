@@ -25,6 +25,28 @@ export HF_HUB_CACHE="$run_root/hf/hub"
 export HF_XET_HIGH_PERFORMANCE=1
 export SGLANG_FLASHINFER_WORKSPACE_SIZE=2147483648
 
+mapfile -t server_pids < <(
+  ps -eo pid=,args= \
+    | awk '$2 == "python3" && $3 == "-m" && $4 == "sglang.launch_server" {print $1}'
+)
+if [ "${#server_pids[@]}" -gt 1 ]; then
+  echo "expected at most one SGLang launch-server process; found ${#server_pids[@]}" >&2
+  exit 1
+fi
+if [ "${#server_pids[@]}" -eq 1 ]; then
+  kill -TERM "${server_pids[0]}"
+  for _ in $(seq 1 60); do
+    if ! kill -0 "${server_pids[0]}" 2>/dev/null; then
+      break
+    fi
+    sleep 1
+  done
+  if kill -0 "${server_pids[0]}" 2>/dev/null; then
+    echo "SGLang launch-server did not stop within 60 seconds" >&2
+    exit 1
+  fi
+fi
+
 model_path="$(python3 - <<'PY'
 from huggingface_hub import snapshot_download
 
