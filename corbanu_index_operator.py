@@ -542,6 +542,148 @@ class JobStore:
     def artifact_path(self, job_id: str) -> Path:
         return self.jobs_dir / job_id / "artifact.json"
 
+    def verified_artifact(self, job_id: str) -> dict[str, Any] | None:
+        state = self.read(job_id)
+        path = self.artifact_path(job_id)
+        if not state or state.get("status") != "valid" or not path.exists():
+            return None
+        artifact = json.loads(path.read_text())
+        expected_hash = str(artifact.get("artifact_sha256") or "")
+        stable = dict(artifact)
+        stable.pop("artifact_sha256", None)
+        if len(expected_hash) != 64 or sha256(canonical_bytes(stable)) != expected_hash:
+            raise RuntimeError(f"artifact hash does not verify for {job_id}")
+        if state.get("artifact_sha256") != expected_hash:
+            raise RuntimeError(f"job and artifact hashes disagree for {job_id}")
+        return artifact
+
+    def list_valid_indexes(self) -> dict[str, Any]:
+        rows = []
+        for path in sorted(self.jobs_dir.glob("idx_*/job.json")):
+            state = json.loads(path.read_text())
+            if state.get("status") != "valid":
+                continue
+            artifact = self.verified_artifact(str(state["job_id"]))
+            if artifact is None:
+                continue
+            model = artifact.get("model") or {}
+            proof = artifact.get("replay_proof") or {}
+            construction = artifact.get("construction") or {}
+            rows.append(
+                {
+                    "job_id": state["job_id"],
+                    "index_title": artifact["index_title"],
+                    "index_mandate": artifact["index_mandate"],
+                    "created_at_unix": state.get("created_at_unix"),
+                    "completed_at_unix": state.get("updated_at_unix"),
+                    "constituent_count": artifact["constituent_count"],
+                    "relevance_cutoff": construction.get("relevance_cutoff"),
+                    "weighting": construction.get("weighting"),
+                    "model": model,
+                    "current_admitted_profile": model.get("execution_profile") == MODEL_PROFILE,
+                    "universe": {
+                        key: artifact.get("universe", {}).get(key)
+                        for key in ("id", "as_of_date", "company_count", "universe_sha256")
+                    },
+                    "replay_proof": {
+                        key: proof.get(key)
+                        for key in (
+                            "comparison_count",
+                            "byte_identical_count",
+                            "batch_byte_identical_count",
+                            "strict_retry_count",
+                            "comparisons_sha256",
+                        )
+                    },
+                    "artifact_sha256": artifact["artifact_sha256"],
+                    "artifact_path": f"/v1/indexes/{state['job_id']}/artifact",
+                    "replay_recipe_path": f"/v1/indexes/{state['job_id']}/recipe",
+                }
+            )
+        rows.sort(key=lambda row: (int(row.get("completed_at_unix") or 0), row["job_id"]), reverse=True)
+        return {
+            "schema": "corbanu.index-registry.v1",
+            "index_count": len(rows),
+            "indexes": rows,
+        }
+
+    def replay_recipe(self, job_id: str) -> dict[str, Any] | None:
+        state = self.read(job_id)
+        artifact = self.verified_artifact(job_id)
+        if state is None or artifact is None:
+            return None
+        scores = {
+            (str(row["cik"]), str(row["ticker"])): row
+            for row in artifact.get("scores") or []
+        }
+        company_evidence = []
+        for comparison in artifact.get("replay_comparisons") or []:
+            key = (str(comparison["cik"]), str(comparison["ticker"]))
+            score = scores.get(key) or {}
+            company_evidence.append(
+                {
+                    "cik": key[0],
+                    "ticker": key[1],
+                    "scoring_request_sha256": comparison.get("request_sha256"),
+                    "expected_primary_output_sha256": comparison.get("primary_content_sha256"),
+                    "expected_replay_output_sha256": comparison.get("replay_content_sha256"),
+                    "byte_identical": comparison.get("byte_identical"),
+                    "batch_byte_identical": comparison.get("batch_byte_identical"),
+                    "strict_retry": comparison.get("strict_retry"),
+                    "transcript": score.get("transcript"),
+                }
+            )
+        company_evidence.sort(key=lambda row: (row["ticker"], row["cik"]))
+        stable = {
+            "schema": "corbanu.index-replay-recipe.v1",
+            "job_id": job_id,
+            "artifact_sha256": artifact["artifact_sha256"],
+            "request_sha256": artifact["request_sha256"],
+            "request": state["request"],
+            "required_inputs": {
+                "universe": artifact["universe"],
+                "transcript_snapshot": artifact.get("transcripts") or state.get("transcripts"),
+                "transcript_body_policy": (
+                    "Transcript bodies are licensed inputs and are not embedded in this public recipe. "
+                    "A replayer must acquire each admitted body separately and verify its SHA-256 before use."
+                ),
+            },
+            "mandate_compilation": {
+                "rubric_request_sha256": artifact["rubric_request_sha256"],
+                "expected_rubric_output_sha256": artifact["rubric_content_sha256"],
+                "expected_rubric_raw_utf8": artifact["rubric_raw_utf8"],
+                "parsed_rubric": artifact["rubric"],
+            },
+            "scoring_contract": {
+                "generic_prompt_prefix": GENERIC_SCORING_PROMPT_PREFIX,
+                "generic_prompt_suffix": GENERIC_SCORING_PROMPT_SUFFIX,
+                "response_schema": SCORE_SCHEMA,
+                "canonical_json": "UTF-8 JSON; object keys sorted; separators ',' and ':'; ensure_ascii=false",
+                "company_evidence": company_evidence,
+            },
+            "construction": artifact["construction"],
+            "expected_result": {
+                "score_vector_sha256": artifact["score_vector_sha256"],
+                "replay_proof": artifact["replay_proof"],
+                "constituent_count": artifact["constituent_count"],
+                "holdings": artifact["holdings"],
+            },
+            "replay_procedure": [
+                "Acquire the exact frozen universe and transcript snapshot; verify their declared SHA-256 hashes.",
+                "Launch two independent H200 verifiers under the request's exact model revision and execution profile.",
+                "Recreate the mandate-compiler request and require its raw UTF-8 output hash to match the recipe.",
+                "Construct all company requests in frozen-universe order using the embedded prompt contract and verified transcript bodies.",
+                "Execute identical fixed 32-request batches on both verifiers and compare raw UTF-8 response bytes for every company.",
+                "Parse only byte-identical outputs, apply the frozen relevance cutoff and construction formula, and rebuild integer weights.",
+                "Accept the replay only if every request/output hash, score-vector hash, holding, and final artifact hash matches.",
+            ],
+            "claim_boundary": (
+                "This recipe identifies the inputs and expected byte-level results. It does not redistribute "
+                "licensed transcript bodies, prove that source statements are true, or establish investment merit."
+            ),
+        }
+        return {**stable, "recipe_sha256": sha256(canonical_bytes(stable))}
+
     def read(self, job_id: str) -> dict[str, Any] | None:
         if not re.fullmatch(r"idx_[0-9a-f]{16}", job_id):
             return None
@@ -919,7 +1061,10 @@ class Handler(BaseHTTPRequestHandler):
                 {"ok": True, "service": "corbanu-index-operator", "universe_count": len(self.store.universe)},
             )
             return
-        match = re.fullmatch(r"/v1/indexes/(idx_[0-9a-f]{16})(/artifact)?", path)
+        if path == "/v1/indexes":
+            self.send_json(HTTPStatus.OK, self.store.list_valid_indexes())
+            return
+        match = re.fullmatch(r"/v1/indexes/(idx_[0-9a-f]{16})(/artifact|/recipe)?", path)
         if not match:
             self.send_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
             return
@@ -928,6 +1073,13 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(HTTPStatus.NOT_FOUND, {"error": "job not found"})
             return
         if match.group(2):
+            if match.group(2) == "/recipe":
+                recipe = self.store.replay_recipe(match.group(1))
+                if recipe is None:
+                    self.send_json(HTTPStatus.CONFLICT, {"error": "replay recipe is not available"})
+                    return
+                self.send_json(HTTPStatus.OK, recipe)
+                return
             artifact_path = self.store.artifact_path(match.group(1))
             if state.get("status") != "valid" or not artifact_path.exists():
                 self.send_json(HTTPStatus.CONFLICT, {"error": "artifact is not valid yet"})

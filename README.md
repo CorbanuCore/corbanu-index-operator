@@ -60,3 +60,18 @@ Before provisioning or restarting either H200, follow
 admitted only under the committed strict fixed-32 launch profile and after its
 two-host byte-replay canary passes. `--enable-deterministic-inference` by itself
 is not an admitted configuration.
+
+Public evidence endpoints:
+
+- `GET /v1/indexes` lists completed artifacts after verifying their content
+  hashes.
+- `GET /v1/indexes/{job_id}/artifact` returns the complete index artifact,
+  including scores, reasoning, holdings, and replay comparisons.
+- `GET /v1/indexes/{job_id}/recipe` returns a smaller
+  `corbanu.index-replay-recipe.v1` document with the frozen request, execution
+  contract, rubric, input hashes, all per-company receipts, expected holdings,
+  and replay procedure.
+
+Replay recipes do not contain licensed transcript bodies. A verifier must
+obtain those inputs separately and verify every body against the transcript
+hash committed by the recipe before inference.

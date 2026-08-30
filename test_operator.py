@@ -100,6 +100,96 @@ def test_public_state_exposes_strict_recovery_progress() -> None:
     assert public["recovery"] == {"completed": 7, "total": 19}
 
 
+def test_registry_and_replay_recipe_use_verified_artifact(tmp_path: Path) -> None:
+    job_id = "idx_0123456789abcdef"
+    job_dir = tmp_path / job_id
+    job_dir.mkdir()
+    stable_artifact = {
+        "schema": "corbanu.index-artifact.v1",
+        "valid": True,
+        "job_id": job_id,
+        "request_sha256": "1" * 64,
+        "index_title": "Test index",
+        "index_mandate": "Direct exposure to test infrastructure",
+        "rubric": {"basket_description": "Test"},
+        "rubric_raw_utf8": '{"basket_description":"Test"}',
+        "rubric_request_sha256": "2" * 64,
+        "rubric_content_sha256": "3" * 64,
+        "model": {
+            "id": corbanu.MODEL_ID,
+            "revision": corbanu.MODEL_REVISION,
+            "execution_profile": corbanu.MODEL_PROFILE,
+        },
+        "universe": {
+            "id": "test-universe",
+            "as_of_date": "2026-08-30",
+            "company_count": 1,
+            "universe_sha256": "4" * 64,
+        },
+        "transcripts": {"snapshot_sha256": "5" * 64, "available_count": 1},
+        "construction": {"weighting": "fundamental", "relevance_cutoff": 70},
+        "score_vector_sha256": "6" * 64,
+        "scores": [
+            {
+                "cik": "0000000001",
+                "ticker": "TEST",
+                "score": 75,
+                "transcript": {"available": True, "sha256": "7" * 64},
+            }
+        ],
+        "replay_proof": {
+            "comparison_count": 1,
+            "byte_identical_count": 1,
+            "batch_byte_identical_count": 1,
+            "strict_retry_count": 0,
+            "comparisons_sha256": "8" * 64,
+        },
+        "replay_comparisons": [
+            {
+                "cik": "0000000001",
+                "ticker": "TEST",
+                "request_sha256": "9" * 64,
+                "primary_content_sha256": "a" * 64,
+                "replay_content_sha256": "a" * 64,
+                "byte_identical": True,
+                "batch_byte_identical": True,
+                "strict_retry": False,
+            }
+        ],
+        "constituent_count": 1,
+        "holdings": [{"ticker": "TEST", "weight_units": corbanu.WEIGHT_UNITS}],
+    }
+    artifact_hash = corbanu.sha256(corbanu.canonical_bytes(stable_artifact))
+    artifact = {**stable_artifact, "artifact_sha256": artifact_hash}
+    state = {
+        "job_id": job_id,
+        "status": "valid",
+        "created_at_unix": 1,
+        "updated_at_unix": 2,
+        "artifact_sha256": artifact_hash,
+        "request": admitted_request()["request"],
+        "transcripts": stable_artifact["transcripts"],
+    }
+    (job_dir / "artifact.json").write_bytes(corbanu.canonical_bytes(artifact) + b"\n")
+    (job_dir / "job.json").write_bytes(corbanu.canonical_bytes(state) + b"\n")
+
+    store = object.__new__(corbanu.JobStore)
+    store.jobs_dir = tmp_path
+    registry = store.list_valid_indexes()
+    assert registry["index_count"] == 1
+    assert registry["indexes"][0]["current_admitted_profile"] is True
+    assert registry["indexes"][0]["replay_recipe_path"].endswith("/recipe")
+
+    recipe = store.replay_recipe(job_id)
+    assert recipe is not None
+    assert recipe["required_inputs"]["transcript_snapshot"]["snapshot_sha256"] == "5" * 64
+    assert recipe["scoring_contract"]["company_evidence"][0]["ticker"] == "TEST"
+    assert recipe["scoring_contract"]["company_evidence"][0]["scoring_request_sha256"] == "9" * 64
+    stable_recipe = dict(recipe)
+    recipe_hash = stable_recipe.pop("recipe_sha256")
+    assert corbanu.sha256(corbanu.canonical_bytes(stable_recipe)) == recipe_hash
+
+
 def test_score_request_binds_transcript_body_and_hash() -> None:
     request = {
         "mandate": {"title": "Grid", "phrase": "Direct grid modernization exposure"},
