@@ -1,15 +1,16 @@
 # DeepSeek V4.1 streaming replay execution
 
-**Update 2026-11-08: still no replay-qualified DeepSeek V4.1 Flash run.** Funding was resolved and two GPU phases ran on 2026-09-12 (below); neither recorded G1 or repeatability results. Gates G1–G5 remain open. The admitted replay profile for published indexes is still Qwen3.8-27B-FP8 on H200 ([runbook](H200_REPLAY_RUNBOOK.md)).
+**Update 2026-11-08: DeepSeek V4.1 Flash repeated byte-for-byte on one host, but replay is not proven or admitted.** On 2026-09-12 a single RTX 5090 running the converted MXFP4 GGUF on the streaming llama.cpp fork generated the 4,263-token ENPH first-pass brief twice in fresh processes with identical token IDs, raw bytes, reasoning, content, finish reason and score (85); a 384-token short probe also matched. The raw evidence (`/workspace/g1-evidence` on the instance) was not copied off before the instance was destroyed, so the record is the agent session log and `tensorcash/docs/frontier_moe_work_function_note_20260912.md`. Native V4.1 Flash on 8× H200 under vLLM (2026-09-14) failed: two runs of the same request diverged at token 137. A second host (G3), the four-name canary (G2) and the full index (G5) have never run; the admitted profile for published indexes is still Qwen3.8-27B-FP8 on H200 ([runbook](H200_REPLAY_RUNBOOK.md)).
 
-## 2026-09-12 GPU phases
+## GPU phases since 2026-09-11
 
-| Phase | Hardware | Outcome | Evidence |
+| Phase | Hardware and runtime | Outcome | Evidence |
 | --- | --- | --- | --- |
-| G0 build and kernel test, then extended to G1 (model download, shard verification, ENPH brief and fresh-process repeat) | 1× RTX 5090, 128 GB RAM, Vast; $15 ceiling | CUDA build and kernel test passed (`build-manifest.json`: `built_and_kernel_tested`). The instance was destroyed at the phase deadline; no G1 output, repeat or shard verification was recorded. | `deepseek41-execution-20260911/vast-build-g0-attempt3/` |
-| Q1 native SGLang repeatability | 4× RTX PRO 6000, Vast; $30 ceiling, 3 hours | Instance destroyed at the deadline; no repeatability results were recorded. The watchdog logged a Vast HTTP 429. | `deepseek41-native-pro6000-20260912/vast-native-q1/` |
+| G0 build and kernel test, then G1 (model download, ENPH brief, fresh-process repeat) | 1× RTX 5090, 128 GB RAM, Vast; converted MXFP4 GGUF, JigSawPT llama.cpp fork, one I/O thread, temperature 0, fixed seed; $15 ceiling | **G0 passed** (`build-manifest.json`: `built_and_kernel_tested`). **G1 repeat passed on this host:** 384-token probe and full 4,263-token brief identical across two fresh processes, score 85. Decode 4.1–4.3 tok/s. Same-host repeatability only. Instance destroyed at the deadline before the evidence directory was retrieved. | `deepseek41-execution-20260911/vast-build-g0-attempt3/` (build and kernel logs only); session log 2026-09-12; `tensorcash/docs/frontier_moe_work_function_note_20260912.md` |
+| Q1 native SGLang repeatability | 4× RTX PRO 6000, Vast; $30 ceiling, 3 hours | Instance destroyed at the deadline; no repeatability results recorded. The watchdog logged a Vast HTTP 429. | `deepseek41-native-pro6000-20260912/vast-native-q1/` |
+| Native replay on H200 | 8× H200, native `deepseek-ai/DeepSeek-V4.1-Flash` (`dba1be0a…`), vLLM | **Failed** (`final-comparison.json`: `verified_replay_failure`). With fixed NCCL ring/simple and custom reductions disabled, two runs of the same request in the same process diverged at token 137. Batch-invariant mode would not start (no MXFP4 MoE backend for the configuration). `report.json`: `production_deterministic_admission: false`. | `deepseek-h200-20260914/` |
 
-Both phases have `cleanup.json` confirming no instance remains.
+All three phases have cleanup records confirming no instance remains. `replay_contract/candidate.json` remains `"admitted": false`.
 
 
 Updated 2026-09-11. Goal is blocked on Vast funding after the same billing blocker was confirmed across three consecutive execution turns. **No replay-qualified GPU inference or new index has been completed.** Vast rentals are authorized by the user.
