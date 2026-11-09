@@ -50,7 +50,31 @@ def push_lease(host, deadline):
                 host['remote'] + ':/workspace/trial/lease.json'], timeout=30)
 
 
+def connect(host):
+    """Try the Vast SSH proxy first, then the instance's direct SSH port (the proxy dropped on 2026-11-09)."""
+    if qc.connect(host):
+        return True
+    inv = host['root'] / 'inventory.json'
+    if not inv.exists():
+        return False
+    data = read(inv)
+    rows = data.get('instances') or []
+    if len(rows) != 1:
+        return False
+    row = dict(rows[0])
+    try:
+        port = row['ports']['22/tcp'][0]['HostPort']
+    except (KeyError, IndexError, TypeError):
+        return False
+    if not row.get('public_ipaddr') or (row.get('ssh_host'), str(row.get('ssh_port'))) == (row['public_ipaddr'], str(port)):
+        return False
+    row['ssh_host'], row['ssh_port'] = row['public_ipaddr'], int(port)
+    write(inv, {**data, 'instances': [row]})
+    return qc.connect(host)
+
+
 def main(ceiling):
+    uncapped = ceiling is None
     assert os.path.ismount('/mnt/HC_Volume_101713660')
     assert not (ROOT / 'execution-plan.json').exists(), 'Already launched; inspect instead of retrying'
     assert read(OLD / 'report.json')['status'] == 'full_452_two_host_index_passed'
@@ -74,11 +98,16 @@ def main(ceiling):
     assert len(candidates) == 2, 'Both qualified hosts must be available'
     quotes = sorted(candidates.values(), key=lambda r: r['dph_total'])
     credit = credit_now()
-    assert credit >= ceiling + 2, 'Insufficient credit for this ceiling'
     began = time.time()
     hourly = sum(q['dph_total'] for q in quotes)
-    deadline = began + (ceiling - 10) / hourly * 3600 - 60
-    assert deadline - began >= 2400, 'Less than 40 minutes would remain in the lease'
+    if uncapped:
+        ceiling = 1e9
+        deadline = began + 30 * 86400
+        assert credit >= 30, 'Credit does not cover boot'
+    else:
+        assert credit >= ceiling + 2, 'Insufficient credit for this ceiling'
+        deadline = began + (ceiling - 10) / hourly * 3600 - 60
+        assert deadline - began >= 2400, 'Less than 40 minutes would remain in the lease'
     hosts = []
     for role, quote in zip(('primary', 'replay'), quotes):
         root = ROOT / role
@@ -132,9 +161,9 @@ def main(ceiling):
                 last_credit = time.time()
             for host in hosts:
                 if 'ssh' not in host:
-                    if time.time() > began + 900:
+                    if time.time() > began + 900 and not uncapped:
                         raise TimeoutError('Host SSH was not ready within 15 minutes')
-                    if qc.connect(host):
+                    if connect(host):
                         push_lease(host, deadline)
                 if 'ssh' in host:
                     qc.sync(host)
@@ -163,7 +192,7 @@ def main(ceiling):
                           'spend_ceiling_usd': ceiling, 'matching_prior_qualified_index': True, 'hosts': states})
                     ready = True
                     qc.log('READY: both models resident; boot smoke matches each other and the prior full index')
-            if not ready and time.time() > began + 2700:
+            if not ready and time.time() > began + 2700 and not uncapped:
                 raise TimeoutError('Boot and smoke check exceeded 45 minutes')
             write(ROOT / 'status.json', {'at': time.time(),
                   'state': ('ready' if both_ready else 'busy_or_restarting') if ready else 'booting',
@@ -174,6 +203,11 @@ def main(ceiling):
         write(ROOT / 'controller-error.json', {'at': time.time(), 'type': type(error).__name__, 'error': str(error)})
         qc.log(type(error).__name__ + ': ' + str(error))
     finally:
+        if uncapped and not (ROOT / 'stop').exists() and time.time() < deadline - 30:
+            # Uncapped: a controller failure never releases the rentals; only the stop file or Vast credit does.
+            write(ROOT / 'status.json', {'at': time.time(), 'state': 'controller_exited_hosts_kept', 'deadline': deadline})
+            qc.log('Controller exiting; uncapped rentals left running (touch stop to release)')
+            return
         for host in hosts:
             (host['root'] / 'stop').touch()
         for _ in range(18):
@@ -188,4 +222,5 @@ def main(ceiling):
 
 
 if __name__ == '__main__':
-    main(float(sys.argv[1]) if len(sys.argv) > 1 else 120.0)
+    arg = sys.argv[1] if len(sys.argv) > 1 else '120'
+    main(None if arg == 'uncapped' else float(arg))
