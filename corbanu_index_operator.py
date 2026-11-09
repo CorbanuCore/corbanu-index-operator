@@ -12,7 +12,6 @@ import hashlib
 import json
 import os
 import queue
-import re
 import threading
 import time
 import urllib.error
@@ -82,6 +81,14 @@ def canonical_bytes(value: Any) -> bytes:
 
 def sha256(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
+
+
+def security_key(row: dict[str, Any]) -> str:
+    return str(row.get("security_id") or row["cik"])
+
+
+def valid_job_id(value: str) -> bool:
+    return isinstance(value, str) and value.startswith("idx_") and len(value) == 20 and all(c in "0123456789abcdef" for c in value[4:])
 
 
 def atomic_json(path: Path, payload: Any) -> None:
@@ -436,8 +443,13 @@ def capped_weights(rows: list[dict[str, Any]], raw_field: str) -> list[dict[str,
 
 
 def build_weights(
-    index_request: dict[str, Any], universe: list[dict[str, Any]], scores: list[dict[str, Any]]
+    index_request: dict[str, Any], universe: list[dict[str, Any]], scores: list[dict[str, Any]],
+    *, reference_packet=None,
 ) -> list[dict[str, Any]]:
+    if index_request["construction"]["weighting"] == "market_cap":
+        if reference_packet is None:
+            raise ValueError("cap weighting requires a pinned Felix reference packet")
+        return reference_packet.scored_weights(index_request, universe, scores)
     if index_request["construction"]["weighting"] != "fundamental":
         raise ValueError("The public local operator currently runs the recommended fundamental method only.")
     cutoff = int(index_request["classification"]["relevance_cutoff"])
@@ -478,8 +490,8 @@ def validate_request(payload: Any) -> dict[str, Any]:
     if request.get("schema") != "corbanu.index-request.v1":
         raise ValueError("unsupported request schema")
     mandate = request.get("mandate") or {}
-    title = re.sub(r"\s+", " ", str(mandate.get("title") or "")).strip()
-    phrase = re.sub(r"\s+", " ", str(mandate.get("phrase") or "")).strip()
+    title = " ".join(str(mandate.get("title") or "").split())
+    phrase = " ".join(str(mandate.get("phrase") or "").split())
     if not 3 <= len(title) <= 80:
         raise ValueError("index title must be 3 through 80 characters")
     if not 12 <= len(phrase) <= 600:
@@ -491,25 +503,46 @@ def validate_request(payload: Any) -> dict[str, Any]:
     if request.get("model", {}).get("execution") != STRICT_EXECUTION_PROFILE:
         raise ValueError("model execution controls do not match the admitted strict fixed-32 profile")
     cutoff = request.get("classification", {}).get("relevance_cutoff")
-    if not isinstance(cutoff, int) or not 0 <= cutoff <= 100:
+    if isinstance(cutoff, bool) or not isinstance(cutoff, int) or not 0 <= cutoff <= 100:
         raise ValueError("relevance cutoff must be an integer from 0 to 100")
-    if request.get("construction", {}).get("weighting") != "fundamental":
-        raise ValueError("cap weighting is not enabled in the public operator; choose Fundamental weighted")
+    construction = request.get("construction", {})
+    if construction.get("weighting") == "market_cap":
+        spec = construction.get("market_cap", {})
+        if spec.get("provider") != "Felix" or not spec.get("packet_sha256") or not spec.get("capitalization_basis"):
+            raise ValueError("cap weighting requires Felix provider, packet_sha256 and explicit capitalization_basis")
+        if any(not isinstance(spec.get(key), str) for key in ("provider", "packet_sha256", "capitalization_basis")):
+            raise ValueError("cap construction identifiers must be strings")
+        if len(spec["packet_sha256"]) != 64 or any(c not in "0123456789abcdef" for c in spec["packet_sha256"]):
+            raise ValueError("invalid packet SHA-256")
+        if any(key in construction for key in ("holding_cap", "fundamental", "profitability_overlay", "score_multiplier")):
+            raise ValueError("pure cap weighting does not accept fundamental overlays or a holding cap")
+        if set(spec) != {"provider", "packet_sha256", "capitalization_basis"} or set(construction) - {"weighting", "market_cap", "rebalance_frequency", "rebalance_trigger", "integer_weight_units"}:
+            raise ValueError("unsupported cap construction parameters")
+        if construction.get("integer_weight_units", WEIGHT_UNITS) != WEIGHT_UNITS:
+            raise ValueError("packet weight serialization requires 10^12 integer units")
+    elif construction.get("weighting") != "fundamental":
+        raise ValueError("unsupported weighting method")
     request["mandate"] = {"title": title, "phrase": phrase}
     return request
 
 
 class JobStore:
-    def __init__(self, jobs_dir: Path, universe_path: Path, transcript_path: Path, workers: int) -> None:
+    def __init__(self, jobs_dir: Path, universe_path: Path, transcript_path: Path, workers: int,
+                 *, reference_packet=None, transcript_selection=None) -> None:
         if workers != WORKERS_PER_HOST:
             raise ValueError(f"workers per host must be exactly {WORKERS_PER_HOST}")
         self.jobs_dir = jobs_dir
-        self.universe, self.universe_sha256, self.universe_metadata = load_universe(universe_path)
-        (
-            self.transcripts,
-            self.transcript_snapshot_sha256,
-            self.transcript_metadata,
-        ) = load_transcripts(transcript_path, self.universe)
+        self.reference_packet = reference_packet
+        if reference_packet is not None:
+            self.universe = reference_packet.universe
+            self.universe_sha256 = reference_packet.packet_sha256
+            self.universe_metadata = reference_packet.metadata
+            if transcript_selection is None:
+                raise ValueError("Packet mode requires an explicit transcript-selection file")
+            self.transcripts, self.transcript_snapshot_sha256, self.transcript_metadata = reference_packet.transcripts(transcript_selection)
+        else:
+            self.universe, self.universe_sha256, self.universe_metadata = load_universe(universe_path)
+            self.transcripts, self.transcript_snapshot_sha256, self.transcript_metadata = load_transcripts(transcript_path, self.universe)
         self.workers = workers
         self.pending: queue.Queue[str] = queue.Queue(maxsize=3)
         self.lock = threading.Lock()
@@ -653,18 +686,16 @@ class JobStore:
             return None
         if self.publication_rejection_reason(state, artifact) is not None:
             return None
-        scores = {
-            (str(row["cik"]), str(row["ticker"])): row
-            for row in artifact.get("scores") or []
-        }
+        scores = {security_key(row): row for row in artifact.get("scores") or []}
         company_evidence = []
         for comparison in artifact.get("replay_comparisons") or []:
-            key = (str(comparison["cik"]), str(comparison["ticker"]))
+            key = security_key(comparison)
             score = scores.get(key) or {}
             company_evidence.append(
                 {
-                    "cik": key[0],
-                    "ticker": key[1],
+                    "cik": comparison["cik"],
+                    "ticker": comparison["ticker"],
+                    **({"security_id": comparison["security_id"]} if comparison.get("security_id") else {}),
                     "scoring_request_sha256": comparison.get("request_sha256"),
                     "expected_primary_output_sha256": comparison.get("primary_content_sha256"),
                     "expected_replay_output_sha256": comparison.get("replay_content_sha256"),
@@ -726,7 +757,7 @@ class JobStore:
         return {**stable, "recipe_sha256": sha256(canonical_bytes(stable))}
 
     def read(self, job_id: str) -> dict[str, Any] | None:
-        if not re.fullmatch(r"idx_[0-9a-f]{16}", job_id):
+        if not valid_job_id(job_id):
             return None
         path = self.path(job_id)
         return json.loads(path.read_text()) if path.exists() else None
@@ -739,6 +770,12 @@ class JobStore:
             atomic_json(self.path(job_id), state)
 
     def submit(self, request: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+        reference = getattr(self, "reference_packet", None)
+        if request["construction"]["weighting"] == "market_cap":
+            if reference is None or request["construction"]["market_cap"]["packet_sha256"] != reference.packet_sha256:
+                raise ValueError("cap weighting requires the operator's configured Felix packet")
+        elif reference is not None:
+            raise ValueError("Felix packet mode accepts market_cap construction only")
         requested_universe = request.get("universe") or {}
         if requested_universe.get("id") != self.universe_metadata["id"]:
             raise ValueError("request universe id does not match the operator's frozen universe")
@@ -836,11 +873,11 @@ class JobStore:
                 request,
                 primary_rubric.parsed,
                 company,
-                self.transcripts[company["cik"]],
+                self.transcripts[security_key(company)],
             )
             response = complete(endpoint, payload)
             validate_score(response.parsed, company["ticker"])
-            return host, company["cik"], response
+            return host, security_key(company), response
 
         # Both verifiers receive the same fixed batch membership before either
         # advances. This preserves the admitted 32-request profile while
@@ -877,7 +914,7 @@ class JobStore:
         comparisons = []
         retry_companies = []
         for company in self.universe:
-            pair = results.get(company["cik"], {})
+            pair = results.get(security_key(company), {})
             if set(pair) != {"primary", "replay"}:
                 raise RuntimeError(f"missing replay pair for {company['ticker']}")
             primary = pair["primary"]
@@ -903,7 +940,7 @@ class JobStore:
                     request,
                     primary_rubric.parsed,
                     company,
-                    self.transcripts[company["cik"]],
+                    self.transcripts[security_key(company)],
                 )
                 strict_primary = complete(PRIMARY_ENDPOINT, payload)
                 strict_replay = complete(REPLAY_ENDPOINT, payload)
@@ -913,13 +950,13 @@ class JobStore:
                     raise RuntimeError(f"strict request replay failed for {company['ticker']}")
                 if strict_primary.raw.encode("utf-8") != strict_replay.raw.encode("utf-8"):
                     raise RuntimeError(f"strict byte replay failed for {company['ticker']}")
-                results[company["cik"]]["strict_primary"] = {
+                results[security_key(company)]["strict_primary"] = {
                     "raw": strict_primary.raw,
                     "parsed": strict_primary.parsed,
                     "request_sha256": strict_primary.request_sha256,
                     "content_sha256": strict_primary.content_sha256,
                 }
-                results[company["cik"]]["strict_replay"] = {
+                results[security_key(company)]["strict_replay"] = {
                     "raw": strict_replay.raw,
                     "parsed": strict_replay.parsed,
                     "request_sha256": strict_replay.request_sha256,
@@ -936,7 +973,7 @@ class JobStore:
                 )
 
         for company in self.universe:
-            pair = results[company["cik"]]
+            pair = results[security_key(company)]
             batch_primary = pair["primary"]
             batch_replay = pair["replay"]
             batch_byte_identical = (
@@ -951,6 +988,7 @@ class JobStore:
             comparisons.append(
                 {
                     "cik": company["cik"],
+                    **({"security_id": company["security_id"]} if company.get("security_id") else {}),
                     "ticker": company["ticker"],
                     "request_sha256": accepted_primary["request_sha256"],
                     "primary_content_sha256": accepted_primary["content_sha256"],
@@ -967,10 +1005,11 @@ class JobStore:
             )
             if not byte_identical:
                 raise RuntimeError(f"accepted byte replay failed for {company['ticker']}")
-            transcript = self.transcripts[company["cik"]]
+            transcript = self.transcripts[security_key(company)]
             score_rows.append(
                 {
                     "cik": company["cik"],
+                    **({"security_id": company["security_id"]} if company.get("security_id") else {}),
                     "ticker": company["ticker"],
                     **accepted_primary["parsed"],
                     "raw_model_output": accepted_primary["raw"],
@@ -985,11 +1024,12 @@ class JobStore:
             )
 
         self.update(job_id, stage="constructing_weights", progress={"completed": total, "total": total})
-        holdings = build_weights(request, self.universe, score_rows)
+        holdings = build_weights(request, self.universe, score_rows, reference_packet=getattr(self, "reference_packet", None))
         if not holdings:
             raise RuntimeError("no companies met the requested relevance cutoff")
         score_vector = [
-            {"cik": row["cik"], "ticker": row["ticker"], "score": row["score"], "confidence": row["confidence"]}
+            {"cik": row["cik"], "ticker": row["ticker"], "score": row["score"], "confidence": row["confidence"],
+             **({"security_id": row["security_id"]} if row.get("security_id") else {})}
             for row in sorted(score_rows, key=lambda row: (row["ticker"], row["cik"]))
         ]
         replay_proof = {
@@ -1036,6 +1076,14 @@ class JobStore:
             "constituent_count": len(holdings),
             "holdings": holdings,
         }
+        if request["construction"]["weighting"] == "market_cap":
+            stable_artifact["construction"] = {
+                "weighting": "market_cap", "formula": "SEC outstanding shares converted to listing units * Felix underlying share price; proportional weights",
+                "market_cap": request["construction"]["market_cap"],
+                "relevance_cutoff": request["classification"]["relevance_cutoff"],
+                "weight_units": WEIGHT_UNITS, "rounding": "largest_remainder_then_security_id",
+                "replay_policy": stable_artifact["construction"]["replay_policy"],
+            }
         artifact_hash = sha256(canonical_bytes(stable_artifact))
         artifact = {**stable_artifact, "artifact_sha256": artifact_hash}
         atomic_json(self.artifact_path(job_id), artifact)
@@ -1105,23 +1153,25 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/v1/indexes":
             self.send_json(HTTPStatus.OK, self.store.list_valid_indexes())
             return
-        match = re.fullmatch(r"/v1/indexes/(idx_[0-9a-f]{16})(/artifact|/recipe)?", path)
-        if not match:
+        parts = path.split("/")
+        if len(parts) not in (4, 5) or parts[:3] != ["", "v1", "indexes"] or not valid_job_id(parts[3]) or (len(parts) == 5 and parts[4] not in {"artifact", "recipe"}):
             self.send_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
             return
-        state = self.store.read(match.group(1))
+        job_id = parts[3]
+        resource = parts[4] if len(parts) == 5 else None
+        state = self.store.read(job_id)
         if not state:
             self.send_json(HTTPStatus.NOT_FOUND, {"error": "job not found"})
             return
-        if match.group(2):
-            if match.group(2) == "/recipe":
-                recipe = self.store.replay_recipe(match.group(1))
+        if resource:
+            if resource == "recipe":
+                recipe = self.store.replay_recipe(job_id)
                 if recipe is None:
                     self.send_json(HTTPStatus.CONFLICT, {"error": "replay recipe is not available"})
                     return
                 self.send_json(HTTPStatus.OK, recipe)
                 return
-            artifact = self.store.verified_artifact(match.group(1))
+            artifact = self.store.verified_artifact(job_id)
             if artifact is None:
                 self.send_json(HTTPStatus.CONFLICT, {"error": "artifact is not valid yet"})
                 return
@@ -1173,8 +1223,34 @@ def main() -> None:
     parser.add_argument("--universe", type=Path, default=DEFAULT_UNIVERSE)
     parser.add_argument("--transcripts", type=Path, default=DEFAULT_TRANSCRIPTS)
     parser.add_argument("--workers-per-host", type=int, default=WORKERS_PER_HOST)
+    parser.add_argument("--reference-packet-root", type=Path)
+    parser.add_argument("--packet-sha256")
+    parser.add_argument("--transcript-key-file", type=Path,
+                        help="Authorized reader's AES key for encrypted consumption transcripts")
+    parser.add_argument("--transcript-selection", type=Path,
+                        help="JSON map: every packet security ID to exact transcript hash or null")
+    parser.add_argument("--cap-weight-request", type=Path, help="Offline cap weights; no inference or API server")
+    parser.add_argument("--weight-output", type=Path)
     args = parser.parse_args()
-    store = JobStore(args.jobs_dir, args.universe, args.transcripts, args.workers_per_host)
+    reference = None
+    if args.reference_packet_root is not None:
+        if not args.packet_sha256:
+            parser.error("--reference-packet-root requires --packet-sha256")
+        from felix_packets import ReferencePacket
+        reference = ReferencePacket(args.reference_packet_root, args.packet_sha256,
+            transcript_key=args.transcript_key_file.read_bytes() if args.transcript_key_file else None)
+    if args.cap_weight_request:
+        if reference is None or args.weight_output is None:
+            parser.error("offline cap weights require a reference packet and --weight-output")
+        result = reference.weights(json.loads(args.cap_weight_request.read_bytes()))
+        atomic_json(args.weight_output, result)
+        print(json.dumps({k: v for k, v in result.items() if k != "weights"}), flush=True)
+        if result["status"] != "ready":
+            raise SystemExit(2)
+        return
+    selection = json.loads(args.transcript_selection.read_bytes()) if args.transcript_selection else None
+    store = JobStore(args.jobs_dir, args.universe, args.transcripts, args.workers_per_host,
+                     reference_packet=reference, transcript_selection=selection)
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     server.store = store  # type: ignore[attr-defined]
     print(

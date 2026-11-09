@@ -1,5 +1,12 @@
 # Corbanu Index Operator
 
+Felix packet mode now supports capitalization weighting from canonical
+NavStrategies packets. It consumes complete cached transcript bodies and keeps
+the existing Qwen revision, runtime and two-verifier replay contract. See
+[`docs/FELIX_PACKETS.md`](docs/FELIX_PACKETS.md) for packet ingestion, the offline
+weight command, and configuration of an inference service against a pinned
+packet. The revenue-universe mode described below is the legacy mode.
+
 Local execution service for Corbanu Indexes. It binds only to
 localhost and is exposed through a narrow HTTPS tunnel. A job compiles the
 mandate, scores the canonical top-1,000 SEC-revenue universe on two independent
@@ -38,10 +45,11 @@ revenue. SEC SIC codes route financials and utilities to trailing net income;
 all other companies use trailing free cash flow. Licensed vendor data is not an
 input, fallback, or membership gate.
 
-This first end-to-end operator enables the recommended fundamental method. The
-cap-weighted option remains visible in the product contract but is rejected by
-the public operator until a suitable market-data redistribution arrangement is
-in place.
+The legacy revenue-universe mode enables the fundamental method. Cap weighting
+requires packet mode and a request binding its Felix provider, immutable packet
+hash and explicit capitalization basis. It does not accept the legacy holding
+cap or fundamental overlays. A source change does not by itself update the
+separately deployed public service or its website configuration.
 
 Run:
 

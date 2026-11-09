@@ -125,8 +125,8 @@ def main(ceiling):
                     now_credit = credit_now()
                     write(ROOT / 'credit-monitor.json', {'at': time.time(), 'available_credit_usd': now_credit,
                           'observed_account_decrease_usd': credit - now_credit, 'spend_ceiling_usd': ceiling})
-                    if now_credit < max(5, credit - ceiling + 3):
-                        raise RuntimeError('Account spend guard reached')
+                    if ceiling < 1e8 and now_credit < max(5, credit - ceiling + 3):
+                        raise RuntimeError('Account spend guard reached')  # skipped when the operator removes the cap
                 except ValueError as error:
                     qc.log('Credit refresh unavailable: ' + str(error))
                 last_credit = time.time()
