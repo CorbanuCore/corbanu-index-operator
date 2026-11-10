@@ -1,0 +1,25 @@
+{
+  "schema": "corbanu.source-lock.v1",
+  "files": [
+    {
+      "path": "/home/pfrpc/repos/CorbanuAPI/src/indexing/legacy.ts",
+      "sha256": "dfba89383da8b8ee172bc1e355dfa312c85930fe0e72fce9df1edc11e090aa6f"
+    },
+    {
+      "path": "/home/pfrpc/repos/CorbanuAPI/src/indexing/legacy-profile.ts",
+      "sha256": "8c37341e2240f237f177d1d4d2abbac56d1b898149fdd150045704f77c0c505d"
+    },
+    {
+      "path": "/home/pfrpc/repos/CorbanuAPI/src/indexing/weights.ts",
+      "sha256": "10ea5bacbb7b848653ecc70832343784cb227676f5c01af5e5f7940000c02fff"
+    },
+    {
+      "path": "/home/pfrpc/repos/CorbanuAPI/src/indexing/common.ts",
+      "sha256": "d9ea81c1d36c0caf1304ee2c20c3eaa8a7b5422b000bac16453eca9cb04a8552"
+    },
+    {
+      "path": "/mnt/HC_Volume_101713660/pfrpc/scratch/aoc-deepseek-flash-20260911/run.mts",
+      "sha256": "847b1e3bdc50c75052e628edc914091952068c88b22ee148d0f47d668a1d016b"
+    }
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "status": "passed",
+  "source_signature_verified": true,
+  "all_original_request_hashes_verified": true,
+  "request_count": 452,
+  "input_tokens_min": 248,
+  "input_tokens_max": 268,
+  "all_full_overflow_budgets_fit": true,
+  "native_profile_sha256": "86d00e37d77030484f396d1dc62bebb5efa4c7d5fa36152e7ad3deaeff3704ae"
+}

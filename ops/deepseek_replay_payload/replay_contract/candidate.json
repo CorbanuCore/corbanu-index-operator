@@ -1,0 +1,52 @@
+{
+  "schema": "corbanu.streaming-candidate.v1",
+  "id": "deepseek-v41-flash-jigsaw-5090-linux-candidate-20260911",
+  "admitted": false,
+  "publication_allowed": false,
+  "native_revision": "dba1be0a40aa45a94ad051997016db3960a90277",
+  "gguf_revision": "61ca37086ef36f20a407da7630cfc91273822dcb",
+  "runtime_revision": "3c95ac82c19e496348fe57d06f083880a7d86e95",
+  "gpu": "NVIDIA GeForce RTX 5090",
+  "gpu_count": 1,
+  "reference_os": "Linux",
+  "cuda_toolkit": "13.0",
+  "system_ram_nominal_gb": 128,
+  "working_storage_bytes": 2000000000000,
+  "expert_gpu_cache_gib": 18,
+  "expert_host_cache_gib": 72,
+  "io_threads": 1,
+  "concurrency": 1,
+  "fresh_process_per_stage": true,
+  "speculation": false,
+  "prompt_cache": false,
+  "context_tokens": 65536,
+  "temperature": 0,
+  "seed": 438916795,
+  "thinking_numeric_effort": 75,
+  "thinking_effort_basis": "Pinned official encoder default high; hosted API equivalence unestablished",
+  "finalizer_thinking": false,
+  "paid_phase": null,
+  "unresolved_admission_requirements": [
+    "conversion_lineage_and_tensor_audit",
+    "built_binary_and_complete_effective_settings",
+    "regex_free_runtime_call_path_audit",
+    "thinking_compatible_json_decoding",
+    "tokenizer_and_raw_token_roundtrip_including_termination",
+    "context_and_memory_qualification",
+    "same_host_and_independent_host_replay",
+    "quoted_phase_cost_expiry_and_cleanup"
+  ],
+  "reference_recipe_os": "Windows",
+  "linux_cpu_build_verified": true,
+  "linux_cuda_build_verified": false,
+  "runtime_patch_sources": {
+    "ops/patch_deepseek_runtime.py": "81962a675eb29985132b0d0aadc5ea9a37bf5b8f44cca7f9a17c224c9c3de40c",
+    "ops/deepseek3_split.cpp.inc": "21508a9b90b0a3cd57b0d6274e85877f67a0c90cf402a7a946bf9fdf00dabc55"
+  },
+  "weight_inventory_sha256": {
+    "native": "e34169482a070dabec725df809168780c6ecb3feb0059d42f1ec55fe99825ffc",
+    "gguf": "ddeaaf1f609f1b33adc5c6928eef632edb753ddc1a95737ed99964b8e67b4aef"
+  },
+  "native_tokenizer_sha256": "c90dfa01249db1be4245780a052ede752e1361c612ac6d08e2bdada7d599476b",
+  "job_sha256": "9daf249372a4ba959bbc4d78d95ebca4e355d2d0c70a14b70135d2d363500707"
+}

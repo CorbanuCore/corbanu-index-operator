@@ -1,0 +1,212 @@
+[
+  {
+    "type": "directory",
+    "oid": "9ab86ff30b04aa7bd57eceef5cf86d4e4d3348c8",
+    "size": 0,
+    "path": "jit-cache"
+  },
+  {
+    "type": "directory",
+    "oid": "abb5933da7d1c38089bc78ccb3f76c901775ad05",
+    "size": 0,
+    "path": "licenses"
+  },
+  {
+    "type": "directory",
+    "oid": "9dd35cab06ab99d26796a5ca544b8533002bbde3",
+    "size": 0,
+    "path": "patches"
+  },
+  {
+    "type": "directory",
+    "oid": "70a051d2957b19108c47c7e65cd96da6e28aafbb",
+    "size": 0,
+    "path": "wheels"
+  },
+  {
+    "type": "file",
+    "oid": "e7764b40b8fef76a2c03ef7b04be0f55076bedf6",
+    "size": 1919,
+    "path": ".gitattributes"
+  },
+  {
+    "type": "file",
+    "oid": "ec72a6c681dae55088c4d844e1c2594ed0b9ab84",
+    "size": 6080,
+    "path": "README.md"
+  },
+  {
+    "type": "file",
+    "oid": "dfe400c456cf5dbd176b8f19a6713bc20f668b59",
+    "size": 2263,
+    "path": "SHA256SUMS"
+  },
+  {
+    "type": "file",
+    "oid": "23492b651993effbe4c270046a5431138ae22d76",
+    "size": 3452,
+    "path": "build-deepinfer.sh"
+  },
+  {
+    "type": "file",
+    "oid": "7b3f1287cd90ad4bf002dc013ffe1c3f8c338e50",
+    "size": 5529862,
+    "lfs": {
+      "oid": "ebe5f8cbaf5f2b78f6ae758ac35ca9d60f85e1077290b37a529f3a197f74ac57",
+      "size": 5529862,
+      "pointerSize": 132
+    },
+    "xetHash": "d4d684f2fef5f6ebf338611d4d82057b19064aba92b5aed7af9961a27c6ef5c4",
+    "path": "deepinfer-9bd9cf2-prefixcache-sm100-cu132-cp312.tar.zst"
+  },
+  {
+    "type": "file",
+    "oid": "e8aad9a21466c0aadd3c68c6a13f9f6be5636db7",
+    "size": 1709,
+    "path": "install.sh"
+  },
+  {
+    "type": "file",
+    "oid": "8cde27f2029d3d34660d76bb955f18897330303f",
+    "size": 4804676,
+    "lfs": {
+      "oid": "93b2b4dd3651075644e75fe35682e0ed7560d272f91c7a48d6da6c8b1a4496cf",
+      "size": 4804676,
+      "pointerSize": 132
+    },
+    "xetHash": "d9de3308c9de68d5c13d0f42cde8576ba324bdb4be2b324154c56114ee9a2585",
+    "path": "jit-cache/jit-cache-1xb200-trimmed.tar.zst"
+  },
+  {
+    "type": "file",
+    "oid": "8a7f6dafb596e807ce78f866a11d5660971f765e",
+    "size": 6588902,
+    "lfs": {
+      "oid": "b345363e7dbb5c129844a078cb05aa7fa6164fc28cb90673b3d77dcc82bda41b",
+      "size": 6588902,
+      "pointerSize": 132
+    },
+    "xetHash": "01b7561464c570e67ee68105561a3e8c3ec3727350746841bcf4a67841c3842b",
+    "path": "jit-cache/jit-cache-4xb200-ep4.tar.zst"
+  },
+  {
+    "type": "file",
+    "oid": "5c48bdc9f6ef95f725096ff5434012da927b516f",
+    "size": 1065,
+    "path": "licenses/DeepEP-MIT.txt"
+  },
+  {
+    "type": "file",
+    "oid": "5c48bdc9f6ef95f725096ff5434012da927b516f",
+    "size": 1065,
+    "path": "licenses/DeepGEMM-MIT.txt"
+  },
+  {
+    "type": "file",
+    "oid": "261eeb9e9f8b2b4b0d119366dda99c6fd7d35c64",
+    "size": 11357,
+    "path": "licenses/DeepInfer-Apache-2.0.txt"
+  },
+  {
+    "type": "file",
+    "oid": "995061f1ee54a8cb65e8bb90ad59b58027e59c6b",
+    "size": 1064,
+    "path": "licenses/DeepSelect-MIT.txt"
+  },
+  {
+    "type": "file",
+    "oid": "5c48bdc9f6ef95f725096ff5434012da927b516f",
+    "size": 1065,
+    "path": "licenses/FlashMLA-MIT.txt"
+  },
+  {
+    "type": "file",
+    "oid": "9105aa3c2bb09213abcb155d0c98ed82096dbb95",
+    "size": 28234,
+    "path": "patches/deepinfer-engram-local.patch"
+  },
+  {
+    "type": "file",
+    "oid": "303bd0c08227bf1c92318dfb7f400ae66706b4e1",
+    "size": 826,
+    "path": "patches/deepinfer-nvls-optout.patch"
+  },
+  {
+    "type": "file",
+    "oid": "223730dacc81a3471d55961ccd8914b8adb080cd",
+    "size": 15764,
+    "path": "patches/deepinfer-prefix-cache.patch"
+  },
+  {
+    "type": "file",
+    "oid": "f997f857293d12fb7103ef4253352348fc4fcf71",
+    "size": 5437,
+    "path": "rebuild-deepinfer-C.sh"
+  },
+  {
+    "type": "file",
+    "oid": "494109332151493f4a5c8660672e1dcfa6d5705f",
+    "size": 483,
+    "path": "requirements-dev.txt"
+  },
+  {
+    "type": "file",
+    "oid": "e7769aa330dded358772dd5d28a1988cb2d7865b",
+    "size": 127,
+    "path": "requirements-nvidia.txt"
+  },
+  {
+    "type": "file",
+    "oid": "6a01f00efc9268d3a08208cfbc98ead74aa75ca1",
+    "size": 342,
+    "path": "requirements.txt"
+  },
+  {
+    "type": "file",
+    "oid": "0e24a5e80dd0126359aaada06bb8d1ce756bf899",
+    "size": 8823826,
+    "lfs": {
+      "oid": "4295679ef2baf8473ae2ab1aeeac9772a16c04ac58e4f75343629c6f88b9b4f1",
+      "size": 8823826,
+      "pointerSize": 132
+    },
+    "xetHash": "25721fbfdaa888408be30efd206dd18c407657a1be9530852bbe2dbb93fb6f7a",
+    "path": "wheels/deep_ep-2.5.0+f6aa38f-cp312-cp312-linux_x86_64.whl"
+  },
+  {
+    "type": "file",
+    "oid": "70ad36bf2f3fbffe1ca9b415ebe1f2e6462865c2",
+    "size": 12808769,
+    "lfs": {
+      "oid": "3cc7a6ba2f7ce61e154737240f669a5136e6f210665d7d03e96ab5c1f9c62ea7",
+      "size": 12808769,
+      "pointerSize": 133
+    },
+    "xetHash": "8158edc95aa8f373759969de12cfd1875a19b41f002fdfaadd9055fcbf33844c",
+    "path": "wheels/deep_gemm-2.8.2+1fc9c66-cp312-cp312-linux_x86_64.whl"
+  },
+  {
+    "type": "file",
+    "oid": "2618f1725dd06ffe1ddef193db128209bcf9e5ec",
+    "size": 21638376,
+    "lfs": {
+      "oid": "a94cd6125b7534ec14983b2cec25183d90d72602ec8ef1f747cf088bfd8d19f1",
+      "size": 21638376,
+      "pointerSize": 133
+    },
+    "xetHash": "4dd81be146f73d06ef26106446d26578eda91be734884a9b137254fe33c25a66",
+    "path": "wheels/deep_select-1.0.0+bfa4507.20261022.114900-cp312-cp312-linux_x86_64.whl"
+  },
+  {
+    "type": "file",
+    "oid": "068527b0311aaa798a2316de714d595edf5c500c",
+    "size": 23423918,
+    "lfs": {
+      "oid": "9dd1594fb5b4fd35c28c91f54dd746265c931e6890c85f0ce4bcc1c4124ef064",
+      "size": 23423918,
+      "pointerSize": 133
+    },
+    "xetHash": "71982e397856aaa07a759017f1e45f384d8acd88433954750f149bcbdd850881",
+    "path": "wheels/flash_mla-1.0.0+2e5429f-cp312-cp312-linux_x86_64.whl"
+  }
+]
